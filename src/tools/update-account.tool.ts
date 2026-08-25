@@ -7,7 +7,7 @@ const toolDescription = "Update an existing chart‑of‑accounts entry in Quick
 
 const toolSchema = z.object({
   account_id: z.string().min(1),
-  patch: z.record(z.any()),
+  patch: z.record(z.string(), z.any()),
 });
 
 const toolHandler = async ({ params }: any) => {
@@ -28,4 +28,4 @@ export const UpdateAccountTool: ToolDefinition<typeof toolSchema> = {
   description: toolDescription,
   schema: toolSchema,
   handler: toolHandler,
-}; 
+};

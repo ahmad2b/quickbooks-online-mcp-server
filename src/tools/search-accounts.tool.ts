@@ -105,8 +105,8 @@ const advancedCriteriaSchema = z.object({
 
 // Runtime schema keeps full validation
 const RUNTIME_CRITERIA_SCHEMA = z.union([
-  z.record(z.any()),
-  z.array(z.record(z.any())),
+  z.record(z.string(), z.any()),
+  z.array(z.record(z.string(), z.any())),
   advancedCriteriaSchema,
 ]);
 
@@ -195,4 +195,4 @@ export const SearchAccountsTool: ToolDefinition<typeof toolSchema> = {
   description: toolDescription,
   schema: toolSchema,
   handler: toolHandler,
-}; 
+};

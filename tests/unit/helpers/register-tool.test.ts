@@ -1,10 +1,12 @@
 import { describe, it, expect, afterEach, jest } from "@jest/globals";
 import {
   getCrudCategory,
+  getToolAuthority,
+  materializeToolDefinition,
+  authorizeToolContext,
   isToolDisabled,
   RegisterTool,
 } from "../../../src/helpers/register-tool";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ToolDefinition } from "../../../src/types/tool-definition";
 
@@ -12,7 +14,7 @@ import type { ToolDefinition } from "../../../src/types/tool-definition";
 // Verifies that every verb prefix maps to the correct CRUD category string.
 // Uses literal expected values (not re-exported constants) so the test catches
 // both a wrong mapping AND a wrong constant value simultaneously.
-// Covers both underscore (standard) and hyphen (legacy) separator variants.
+// Covers both separators used by existing tool identifiers.
 
 describe("getCrudCategory", () => {
   it("returns WRITE for create_ prefix",  () => expect(getCrudCategory("create_invoice")).toBe("WRITE"));
@@ -25,6 +27,36 @@ describe("getCrudCategory", () => {
   it("returns READ for get- prefix",      () => expect(getCrudCategory("get-vendor")).toBe("READ"));
   it("returns READ for search_ prefix",   () => expect(getCrudCategory("search_customers")).toBe("READ"));
   it("returns READ for read_ prefix",     () => expect(getCrudCategory("read_invoice")).toBe("READ"));
+});
+
+describe("authority metadata", () => {
+  it("classifies every supported authority prefix and rejects unknown names", () => {
+    expect(getToolAuthority("get_invoice")).toBe("read");
+    expect(getToolAuthority("read_invoice")).toBe("read");
+    expect(getToolAuthority("search_invoice")).toBe("read");
+    expect(getToolAuthority("create_invoice")).toBe("write");
+    expect(getToolAuthority("update_invoice")).toBe("write");
+    expect(getToolAuthority("delete_invoice")).toBe("delete");
+    expect(getToolAuthority("unknown_invoice")).toBeUndefined();
+  });
+
+  it("materializes scope metadata and fails closed on authority errors", () => {
+    const schema = z.object({ id: z.string() });
+    const handler = jest.fn() as ToolDefinition<typeof schema>["handler"];
+    const base = { name: "create_invoice", description: "create", schema, handler };
+    expect(materializeToolDefinition(base)).toMatchObject({ authority: "write", scope: "quickbooks.write" });
+    expect(() => materializeToolDefinition({ ...base, authority: "read" })).toThrow(/authority mismatch/);
+    expect(() => materializeToolDefinition({ ...base, name: "unknown_invoice" })).toThrow(/no recognized authority/);
+  });
+
+  it("allows local context and enforces complete HTTP scopes", () => {
+    const schema = z.object({ id: z.string() });
+    const handler = jest.fn() as ToolDefinition<typeof schema>["handler"];
+    const definition = materializeToolDefinition({ name: "delete_invoice", description: "delete", schema, handler });
+    expect(authorizeToolContext(definition, undefined)).toEqual({ allowed: true });
+    expect(authorizeToolContext(definition, { http: { authInfo: { scopes: ["quickbooks.read"] } } }).allowed).toBe(false);
+    expect(authorizeToolContext(definition, { http: { authInfo: { scopes: ["quickbooks.read", "quickbooks.delete"] } } })).toEqual({ allowed: true });
+  });
 });
 
 // ── isToolDisabled ───────────────────────────────────────────────────────────
@@ -72,9 +104,9 @@ describe("isToolDisabled", () => {
 });
 
 // ── RegisterTool ─────────────────────────────────────────────────────────────
-// Verifies the integration between isToolDisabled and server.tool():
-//   - Enabled tools are registered with the exact fields from ToolDefinition.
-//   - Disabled tools cause RegisterTool to return early without calling server.tool().
+// Verifies the integration between isToolDisabled and modern registerTool():
+//   - Enabled tools are registered with the modern definition.
+//   - Disabled tools return early without calling registerTool().
 // Uses a minimal mock server object to avoid coupling to the MCP SDK internals.
 
 describe("RegisterTool", () => {
@@ -89,35 +121,42 @@ describe("RegisterTool", () => {
   const def = (name: string): ToolDefinition<typeof schema> =>
     ({ name, description: `desc:${name}`, schema, handler });
 
-  // Confirm all four ToolDefinition fields are forwarded to server.tool() unchanged.
-  it("calls server.tool() with all definition fields when enabled", () => {
-    const server = { tool: jest.fn() } as unknown as McpServer;
+  it("registers enabled tools through the modern API", () => {
+    const server = { registerTool: jest.fn() };
     const d = def("get_invoice");
     RegisterTool(server, d);
-    expect(server.tool).toHaveBeenCalledTimes(1);
-    expect(server.tool).toHaveBeenCalledWith(d.name, d.description, { params: d.schema }, d.handler);
+    expect(server.registerTool).toHaveBeenCalledTimes(1);
+    expect(server.registerTool).toHaveBeenCalledWith(
+      d.name,
+      expect.objectContaining({
+        description: d.description,
+        inputSchema: d.schema,
+        annotations: expect.objectContaining({ readOnlyHint: true }),
+      }),
+      expect.any(Function),
+    );
   });
 
   // One test per mutable category to confirm the early-return path is reached.
-  it("skips server.tool() for disabled WRITE tool", () => {
+  it("skips registerTool() for disabled WRITE tool", () => {
     process.env["QUICKBOOKS_DISABLE_WRITE"] = "true";
-    const server = { tool: jest.fn() } as unknown as McpServer;
+    const server = { registerTool: jest.fn() };
     RegisterTool(server, def("create_invoice"));
-    expect(server.tool).not.toHaveBeenCalled();
+    expect(server.registerTool).not.toHaveBeenCalled();
   });
 
-  it("skips server.tool() for disabled UPDATE tool", () => {
+  it("skips registerTool() for disabled UPDATE tool", () => {
     process.env["QUICKBOOKS_DISABLE_UPDATE"] = "true";
-    const server = { tool: jest.fn() } as unknown as McpServer;
+    const server = { registerTool: jest.fn() };
     RegisterTool(server, def("update_customer"));
-    expect(server.tool).not.toHaveBeenCalled();
+    expect(server.registerTool).not.toHaveBeenCalled();
   });
 
-  it("skips server.tool() for disabled DELETE tool", () => {
+  it("skips registerTool() for disabled DELETE tool", () => {
     process.env["QUICKBOOKS_DISABLE_DELETE"] = "true";
-    const server = { tool: jest.fn() } as unknown as McpServer;
+    const server = { registerTool: jest.fn() };
     RegisterTool(server, def("delete_payment"));
-    expect(server.tool).not.toHaveBeenCalled();
+    expect(server.registerTool).not.toHaveBeenCalled();
   });
 
   // READ tools must register even when all three DISABLE vars are set.
@@ -125,16 +164,44 @@ describe("RegisterTool", () => {
     process.env["QUICKBOOKS_DISABLE_WRITE"]  = "true";
     process.env["QUICKBOOKS_DISABLE_UPDATE"] = "true";
     process.env["QUICKBOOKS_DISABLE_DELETE"] = "true";
-    const server = { tool: jest.fn() } as unknown as McpServer;
+    const server = { registerTool: jest.fn() };
     RegisterTool(server, def("search_invoices"));
-    expect(server.tool).toHaveBeenCalledTimes(1);
+    expect(server.registerTool).toHaveBeenCalledTimes(1);
   });
 
-  // Confirm the legacy hyphen separator is handled by the early-return path.
+  // Confirm the existing hyphen separator is handled by the early-return path.
   it("skips hyphen-prefixed WRITE tool when QUICKBOOKS_DISABLE_WRITE=true", () => {
     process.env["QUICKBOOKS_DISABLE_WRITE"] = "true";
-    const server = { tool: jest.fn() } as unknown as McpServer;
+    const server = { registerTool: jest.fn() };
     RegisterTool(server, def("create-bill"));
-    expect(server.tool).not.toHaveBeenCalled();
+    expect(server.registerTool).not.toHaveBeenCalled();
+  });
+
+  it("registers modern direct-input callbacks with annotations and one params wrapper", async () => {
+    let callback: ((input: unknown, context: unknown) => unknown) | undefined;
+    const server = {
+      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
+        callback = registered;
+      }),
+    };
+    const d = def("create_invoice");
+    expect(RegisterTool(server, d)).toBe(true);
+    expect(server.registerTool).toHaveBeenCalledWith(
+      d.name,
+      expect.objectContaining({ annotations: expect.objectContaining({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }) }),
+      expect.any(Function),
+    );
+    await callback?.({ id: "123" }, { http: { authInfo: { scopes: ["quickbooks.read"] } } });
+    expect(handler).not.toHaveBeenCalled();
+    await callback?.({ id: "123" }, { http: { authInfo: { scopes: ["quickbooks.read", "quickbooks.write"] } } });
+    expect(handler).toHaveBeenLastCalledWith({ params: { id: "123" } }, expect.anything());
+  });
+
+  it("rejects unsupported servers and honors disable policy before registration", () => {
+    expect(() => RegisterTool({}, def("get_invoice"))).toThrow(/does not support/);
+    process.env["QUICKBOOKS_DISABLE_WRITE"] = "true";
+    const server = { registerTool: jest.fn() };
+    expect(RegisterTool(server, def("create_invoice"))).toBe(false);
+    expect(server.registerTool).not.toHaveBeenCalled();
   });
 });

@@ -198,8 +198,10 @@ describe('QuickbooksClient.authenticate', () => {
     // rather than immediately observing the previous test's leftover value.
     callbackHandler = undefined;
 
-    // Don't await — the flow is left waiting for a (never-arriving) valid callback.
-    void quickbooksClient.authenticate().catch(() => {});
+    // Keep a handle so the test can complete the deliberately invalid flow
+    // below. Leaving the callback listener pending makes Jest report the
+    // pre-existing interactive OAuth logging after the suite has finished.
+    const authPromise = quickbooksClient.authenticate();
 
     await untilCallbackRegistered();
 
@@ -211,5 +213,29 @@ describe('QuickbooksClient.authenticate', () => {
 
     expect(res.writeHead).toHaveBeenCalledWith(400, { 'Content-Type': 'text/plain' });
     expect(createTokenDispatch).not.toHaveBeenCalled();
+
+    // Drive the same flow to its terminal error without exchanging a real
+    // code, which exercises listener cleanup and leaves no open async work.
+    const flowClient = oauthInstances[oauthInstances.length - 1]!;
+    await untilAuthorizeUriCalled(flowClient);
+    const { state } = (flowClient.authorizeUri.mock.calls[0][0] as { state: string });
+    createTokenDispatch.mockRejectedValueOnce(new Error('test cleanup'));
+    await callbackHandler!({ url: `/callback?code=cleanup&state=${state}`, method: 'GET' }, res);
+    await expect(authPromise).rejects.toThrow('test cleanup');
+    expect(fakeServer.close).toHaveBeenCalled();
+  });
+
+  it('refuses interactive OAuth when non-interactive server mode is enabled', async () => {
+    const previous = process.env.QUICKBOOKS_NON_INTERACTIVE;
+    process.env.QUICKBOOKS_NON_INTERACTIVE = 'true';
+    (quickbooksClient as unknown as { refreshToken?: string }).refreshToken = 'stale-refresh-token';
+    (quickbooksClient as unknown as { accessTokenExpiry?: Date }).accessTokenExpiry = new Date(0);
+    refreshDispatch.mockRejectedValueOnce(new Error('invalid_grant'));
+
+    await expect(quickbooksClient.authenticate()).rejects.toThrow(/Interactive QuickBooks OAuth is disabled/);
+    expect(fakeServer.listen).not.toHaveBeenCalled();
+
+    if (previous === undefined) delete process.env.QUICKBOOKS_NON_INTERACTIVE;
+    else process.env.QUICKBOOKS_NON_INTERACTIVE = previous;
   });
 });

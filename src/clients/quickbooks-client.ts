@@ -40,15 +40,6 @@ const TOKEN_STORE_PATH =
 // REFRESH_TOKEN / REALM_ID even when the host config has those keys set to "".
 dotenv.config({ path: TOKEN_STORE_PATH, override: true });
 
-// Register once at module level — registering inside startOAuthFlow() would
-// accumulate duplicate handlers on every OAuth call.
-process.on('uncaughtException', (err) => {
-  console.error('[auth-server] uncaughtException:', err);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('[auth-server] unhandledRejection:', reason);
-});
-
 const client_id = process.env.QUICKBOOKS_CLIENT_ID;
 const client_secret = process.env.QUICKBOOKS_CLIENT_SECRET;
 const refresh_token = process.env.QUICKBOOKS_REFRESH_TOKEN;
@@ -247,6 +238,12 @@ export class QuickbooksClient {
   }
 
   private async startOAuthFlow(): Promise<void> {
+    if (process.env.QUICKBOOKS_NON_INTERACTIVE === 'true') {
+      throw new Error(
+        'Interactive QuickBooks OAuth is disabled in server mode. Provision a valid refresh token before starting the HTTP service.',
+      );
+    }
+
     // The interactive flow below binds a localhost callback server, but Intuit
     // rejects localhost redirect URIs for production apps — so this can only
     // ever succeed in sandbox. Fail fast with guidance rather than opening a
@@ -292,7 +289,9 @@ export class QuickbooksClient {
 
       // Create temporary server for OAuth callback
       const server = http.createServer(async (req, res) => {
-        console.log(`[auth-server] ${req.method} ${req.url}`);
+        // MCP stdio reserves stdout for protocol frames. OAuth diagnostics are
+        // always stderr so an unexpected local bootstrap cannot corrupt it.
+        console.error(`[auth-server] ${req.method} ${req.url}`);
 
         // Respond to anything that isn't /callback so diagnostic probes (curl,
         // ngrok health checks, favicon requests, etc.) don't hang the server.
@@ -308,7 +307,7 @@ export class QuickbooksClient {
         // callback that follows it.
         const incomingState = new URL(req.url, `http://localhost:${port}`).searchParams.get('state');
         if (incomingState !== expectedState) {
-          console.log(`[auth-server] Rejected callback with mismatched state (got: ${incomingState ?? 'none'})`);
+          console.error(`[auth-server] Rejected callback with mismatched state (got: ${incomingState ?? 'none'})`);
           res.writeHead(400, { 'Content-Type': 'text/plain' });
           res.end('Invalid or missing state parameter.');
           return;
@@ -363,6 +362,7 @@ export class QuickbooksClient {
             }, 1000);
           } catch (error) {
             console.error('Error during token creation:', error);
+            server.close();
             res.writeHead(500, { 'Content-Type': 'text/html' });
             res.end(`
               <html>
@@ -391,7 +391,7 @@ export class QuickbooksClient {
       // regardless of whether it resolves `localhost` to 127.0.0.1 or ::1
       server.listen(port, '::', async () => {
         const addr = server.address();
-        console.log(`[auth-server] Listening on ${typeof addr === 'string' ? addr : `${addr?.address}:${addr?.port}`} (family: ${typeof addr === 'object' ? addr?.family : 'n/a'})`);
+        console.error(`[auth-server] Listening on ${typeof addr === 'string' ? addr : `${addr?.address}:${addr?.port}`} (family: ${typeof addr === 'object' ? addr?.family : 'n/a'})`);
 
         // Generate authorization URL with proper type assertion
         const authUri = flowClient.authorizeUri({
@@ -399,10 +399,10 @@ export class QuickbooksClient {
           state: expectedState
         }).toString();
 
-        console.log('\n=== QuickBooks Authorization ===');
-        console.log('Open this URL in a browser to authorize:\n');
-        console.log(authUri);
-        console.log('\nWaiting for callback...\n');
+        console.error('\n=== QuickBooks Authorization ===');
+        console.error('Open this URL in a browser to authorize:\n');
+        console.error(authUri);
+        console.error('\nWaiting for callback...\n');
 
         // Attempt to open the browser automatically; ignore failures on headless systems
         try {
@@ -415,6 +415,7 @@ export class QuickbooksClient {
       // Handle server errors
       server.on('error', (error) => {
         console.error('Server error:', error);
+        server.close();
         this.isAuthenticating = false;
         reject(error);
       });

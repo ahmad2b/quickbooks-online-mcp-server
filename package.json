@@ -3,6 +3,9 @@
     "version": "0.0.1",
     "description": "MCP server implementation for QuickBooks Online integration",
     "license": "MIT",
+    "engines": {
+        "node": ">=20"
+    },
     "main": "dist/index.js",
     "type": "module",
     "bin": "./dist/index.js",
@@ -21,15 +24,20 @@
         "test:coverage": "NODE_OPTIONS='--experimental-vm-modules' jest --coverage"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.6.0",
+        "@modelcontextprotocol/express": "2.0.0",
+        "@modelcontextprotocol/node": "2.0.0",
+        "@modelcontextprotocol/server": "2.0.0",
         "dotenv": "^16.4.7",
+        "express": "5.1.0",
         "intuit-oauth": "^4.0.0",
+        "jose": "^6.2.10",
         "node-quickbooks": "^2.0.43",
         "open": "^9.1.0",
-        "zod": "^3.24.2"
+        "zod": "^4.2.0"
     },
     "devDependencies": {
         "@eslint/js": "^9.22.0",
+        "@types/express": "^5.0.6",
         "@jest/globals": "^30.3.0",
         "@types/jest": "^30.0.0",
         "@types/node": "^22.13.10",

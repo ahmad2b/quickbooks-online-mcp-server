@@ -77,13 +77,17 @@ jest.unstable_mockModule('open', () => ({ default: openMock }));
 // before it; the rotation tests never fall back). If it is, serverCreated flips
 // so we can assert "no doomed browser flow was started".
 let serverCreated = false;
+let serverErrorHandler: ((error: Error) => void) | undefined;
 const fakeServer = {
   listen: jest.fn((_port: unknown, _host: unknown, cb?: () => void) => {
     if (cb) setImmediate(cb);
     return fakeServer;
   }),
   close: jest.fn(),
-  on: jest.fn(),
+  on: jest.fn((event: string, handler: (error: Error) => void) => {
+    if (event === 'error') serverErrorHandler = handler;
+    return fakeServer;
+  }),
   address: jest.fn(() => ({ address: '::', port: 8000, family: 'IPv6' })),
 };
 jest.unstable_mockModule('http', () => ({
@@ -157,6 +161,7 @@ beforeEach(() => {
   fsReadFileSync.mockReset();
   openMock.mockClear();
   serverCreated = false;
+  serverErrorHandler = undefined;
   fsReadFileSync.mockImplementation(() => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   });
@@ -343,8 +348,10 @@ describe('sandbox transient handling', () => {
     fsReadFileSync.mockReturnValue(envWithToken('dead-sbx'));
     refreshDispatch.mockRejectedValue(deadTokenError(400));
 
-    // The localhost callback never completes in this harness, so the flow hangs;
-    // asserting the server was created proves the dead-token path was taken.
+    // The localhost callback is intentionally not completed in this harness;
+    // assert the dead-token path was taken, then terminate through the same
+    // server-error cleanup path a real listener would use so no async flow
+    // leaks past the test boundary.
     const authPromise = client.authenticate();
     const started = await Promise.race([
       (async () => {
@@ -355,5 +362,10 @@ describe('sandbox transient handling', () => {
     ]);
     expect(started).toBe(true);
     expect(serverCreated).toBe(true);
+    for (let i = 0; i < 50 && openMock.mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    serverErrorHandler?.(new Error('test cleanup'));
+    await expect(authPromise).rejects.toThrow('test cleanup');
   });
 });

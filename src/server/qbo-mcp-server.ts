@@ -1,24 +1,30 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { getToolDefinitions } from "../registry.js";
+import { RegisterTool } from "../helpers/register-tool.js";
+import { APPLICATION_VERSION } from "../version.js";
 
-export class QuickbooksMCPServer {
-  private static instance: McpServer | null = null;
+export const QUICKBOOKS_SERVER_INFO = {
+  name: "QuickBooks Online MCP Server",
+  version: APPLICATION_VERSION,
+} as const;
 
-  private constructor() {}
+/**
+ * Build a fresh v2 server instance for one serving unit/request.
+ *
+ * QuickBooks credentials remain process-global by design (Phase 1 is one
+ * deployment to one realm), while protocol state is never shared between HTTP
+ * requests.
+ */
+export function createQuickbooksMcpServer(): McpServer {
+  const server = new McpServer(QUICKBOOKS_SERVER_INFO, {
+    capabilities: {
+      tools: {},
+    },
+  });
 
-  public static GetServer(): McpServer {
-    if (QuickbooksMCPServer.instance === null) {
-      QuickbooksMCPServer.instance = new McpServer(
-        {
-          name: "QuickBooks Online MCP Server",
-          version: "1.0.0",
-        },
-        {
-          capabilities: {
-            tools: {},
-          },
-        }
-      );
-    }
-    return QuickbooksMCPServer.instance;
+  for (const definition of getToolDefinitions()) {
+    RegisterTool(server, definition);
   }
+
+  return server;
 }
