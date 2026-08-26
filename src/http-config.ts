@@ -1,7 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
-import dotenv from "dotenv";
-
 export const MCP_PATH = "/mcp";
 export const MCP_PROTOCOL_VERSION = "2026-07-28";
 export const QUICKBOOKS_SCOPES = [
@@ -25,12 +21,17 @@ export type HttpConfig = {
   bodyLimit: string;
   requestTimeoutMs: number;
   rateLimitPerMinute: number;
-  quickbooksEnvironment: "sandbox" | "production";
+  databaseUrl: string;
+  dataEncryptionKey: string;
+  requestStateKey: string;
+  authBindingClaim: string;
+  authAllowedBindingValues: string[];
+  quickbooksConnectionId: string;
   quickbooksClientId: string;
   quickbooksClientSecret: string;
-  quickbooksRealmId: string;
-  quickbooksRefreshToken: string;
-  tokenStorePath: string;
+  quickbooksBootstrapEnvironment?: "sandbox" | "production";
+  quickbooksBootstrapRealmId?: string;
+  quickbooksBootstrapRefreshToken?: string;
 };
 
 export class HttpConfigurationError extends Error {
@@ -46,23 +47,29 @@ function required(env: NodeJS.ProcessEnv, name: string, errors: string[]): strin
   return value || undefined;
 }
 
-function fromStoreOrEnvironment(
-  env: NodeJS.ProcessEnv,
-  store: Record<string, string>,
-  name: string,
-  errors: string[],
-): string | undefined {
-  const value = store[name]?.trim() || env[name]?.trim();
-  if (!value) errors.push(name);
-  return value || undefined;
-}
-
 function parsePositiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number, errors: string[]): number {
   const raw = env[name]?.trim();
   if (!raw) return fallback;
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) errors.push(name);
   return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function validateBase64Key(
+  value: string | undefined,
+  name: string,
+  expectedBytes: number,
+  errors: string[],
+): void {
+  if (!value) return;
+  try {
+    const decoded = Buffer.from(value, "base64");
+    if (decoded.length !== expectedBytes || decoded.toString("base64").replace(/=+$/, "") !== value.replace(/=+$/, "")) {
+      errors.push(name);
+    }
+  } catch {
+    errors.push(name);
+  }
 }
 
 function parseCsv(value: string | undefined, name: string, errors: string[]): string[] {
@@ -161,46 +168,45 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
   const bodyLimit = env.MCP_BODY_LIMIT?.trim() || "1mb";
   const requestTimeoutMs = parsePositiveInt(env, "MCP_REQUEST_TIMEOUT_MS", 30_000, errors);
   const rateLimitPerMinute = parsePositiveInt(env, "MCP_RATE_LIMIT_PER_MINUTE", 120, errors);
-
-  const tokenStorePath = required(env, "QUICKBOOKS_TOKEN_STORE_PATH", errors);
-
-  let tokenStoreEnv: Record<string, string> = {};
-  if (tokenStorePath && path.isAbsolute(tokenStorePath)) {
-    try {
-      tokenStoreEnv = dotenv.parse(fs.readFileSync(tokenStorePath));
-    } catch {
-      // The path/access error is recorded below; do not expose filesystem
-      // details in startup diagnostics.
-    }
-  }
-
-  // The runtime client loads this same file with dotenv override semantics, so
-  // the startup validator must use identical precedence. This is especially
-  // important for the realm and refresh token, which rotate in the store.
-  const quickbooksClientId = fromStoreOrEnvironment(env, tokenStoreEnv, "QUICKBOOKS_CLIENT_ID", errors);
-  const quickbooksClientSecret = fromStoreOrEnvironment(env, tokenStoreEnv, "QUICKBOOKS_CLIENT_SECRET", errors);
-  const quickbooksRealmId = fromStoreOrEnvironment(env, tokenStoreEnv, "QUICKBOOKS_REALM_ID", errors);
-  const quickbooksRefreshToken = fromStoreOrEnvironment(env, tokenStoreEnv, "QUICKBOOKS_REFRESH_TOKEN", errors);
-  const quickbooksEnvironment = tokenStoreEnv.QUICKBOOKS_ENVIRONMENT?.trim() || env.QUICKBOOKS_ENVIRONMENT?.trim() || "sandbox";
-  if (quickbooksEnvironment !== "sandbox" && quickbooksEnvironment !== "production") {
+  const databaseUrl = required(env, "DATABASE_URL", errors);
+  const dataEncryptionKey = required(env, "MCP_DATA_ENCRYPTION_KEY", errors);
+  const requestStateKey = required(env, "MCP_REQUEST_STATE_KEY", errors);
+  const authBindingClaim = required(env, "MCP_AUTH_BINDING_CLAIM", errors);
+  const authAllowedBindingValues = parseCsv(
+    env.MCP_AUTH_ALLOWED_BINDING_VALUES,
+    "MCP_AUTH_ALLOWED_BINDING_VALUES",
+    errors,
+  );
+  const quickbooksConnectionId = required(env, "QUICKBOOKS_CONNECTION_ID", errors);
+  const quickbooksClientId = required(env, "QUICKBOOKS_CLIENT_ID", errors);
+  const quickbooksClientSecret = required(env, "QUICKBOOKS_CLIENT_SECRET", errors);
+  const quickbooksBootstrapRealmId = env.QUICKBOOKS_REALM_ID?.trim() || undefined;
+  const quickbooksBootstrapRefreshToken = env.QUICKBOOKS_REFRESH_TOKEN?.trim() || undefined;
+  const bootstrapEnvironment = env.QUICKBOOKS_ENVIRONMENT?.trim();
+  if (bootstrapEnvironment && bootstrapEnvironment !== "sandbox" && bootstrapEnvironment !== "production") {
     errors.push("QUICKBOOKS_ENVIRONMENT");
   }
-
-  if (tokenStorePath && !path.isAbsolute(tokenStorePath)) errors.push("QUICKBOOKS_TOKEN_STORE_PATH");
-  if (tokenStorePath && path.isAbsolute(tokenStorePath)) {
+  if (Boolean(quickbooksBootstrapRealmId) !== Boolean(quickbooksBootstrapRefreshToken)) {
+    errors.push("QUICKBOOKS_REALM_ID|QUICKBOOKS_REFRESH_TOKEN");
+  }
+  if (quickbooksBootstrapRealmId && !bootstrapEnvironment) errors.push("QUICKBOOKS_ENVIRONMENT");
+  validateBase64Key(dataEncryptionKey, "MCP_DATA_ENCRYPTION_KEY", 32, errors);
+  validateBase64Key(requestStateKey, "MCP_REQUEST_STATE_KEY", 32, errors);
+  if (databaseUrl) {
     try {
-      const stat = fs.statSync(tokenStorePath);
-      if (!stat.isFile() || (stat.mode & 0o077) !== 0) errors.push("QUICKBOOKS_TOKEN_STORE_PATH");
-      fs.accessSync(tokenStorePath, fs.constants.R_OK | fs.constants.W_OK);
+      const parsed = new URL(databaseUrl);
+      if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") errors.push("DATABASE_URL");
     } catch {
-      errors.push("QUICKBOOKS_TOKEN_STORE_PATH");
+      errors.push("DATABASE_URL");
     }
   }
   if (authIntrospectionUrl && (!env.MCP_AUTH_INTROSPECTION_CLIENT_ID || !env.MCP_AUTH_INTROSPECTION_CLIENT_SECRET)) {
     errors.push("MCP_AUTH_INTROSPECTION_CLIENT_ID|MCP_AUTH_INTROSPECTION_CLIENT_SECRET");
   }
 
-  if (errors.length > 0 || !resourceUri || !authIssuer || !authMetadataUrl || !quickbooksClientId || !quickbooksClientSecret || !quickbooksRealmId || !quickbooksRefreshToken || !tokenStorePath) {
+  if (errors.length > 0 || !resourceUri || !authIssuer || !authMetadataUrl || !databaseUrl ||
+      !dataEncryptionKey || !requestStateKey || !authBindingClaim || !quickbooksConnectionId ||
+      !quickbooksClientId || !quickbooksClientSecret) {
     throw new HttpConfigurationError([...new Set(errors)]);
   }
 
@@ -219,11 +225,18 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     bodyLimit,
     requestTimeoutMs,
     rateLimitPerMinute,
-    quickbooksEnvironment: quickbooksEnvironment as "sandbox" | "production",
+    databaseUrl,
+    dataEncryptionKey,
+    requestStateKey,
+    authBindingClaim,
+    authAllowedBindingValues,
+    quickbooksConnectionId,
     quickbooksClientId,
     quickbooksClientSecret,
-    quickbooksRealmId,
-    quickbooksRefreshToken,
-    tokenStorePath,
+    ...(quickbooksBootstrapRealmId ? { quickbooksBootstrapRealmId } : {}),
+    ...(quickbooksBootstrapRefreshToken ? { quickbooksBootstrapRefreshToken } : {}),
+    ...(bootstrapEnvironment
+      ? { quickbooksBootstrapEnvironment: bootstrapEnvironment as "sandbox" | "production" }
+      : {}),
   };
 }

@@ -5,11 +5,11 @@
 **A comprehensive Model Context Protocol (MCP) server for QuickBooks Online**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-145-green.svg)](#available-tools)
+[![Tools](https://img.shields.io/badge/Tools-142-green.svg)](#available-tools)
 [![Entities](https://img.shields.io/badge/Entities-29-orange.svg)](#entities)
 [![Reports](https://img.shields.io/badge/Reports-11-purple.svg)](#reports)
-[![Coverage](https://img.shields.io/badge/Coverage-100%25-brightgreen.svg)](#testing)
-[![Tests](https://img.shields.io/badge/Tests-396-blue.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/Coverage-configured%20gates%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/Tests-531-blue.svg)](#testing)
 
 [Quick Start](#quick-start) | [Available Tools](#available-tools) | [Authentication](#authentication) | [Documentation](#documentation)
 
@@ -19,20 +19,23 @@
 
 ## Overview
 
-This MCP server provides complete QuickBooks Online API integration for Claude Code and other MCP-compatible clients. It includes full CRUD operations for 29 entity types and 11 financial reports, giving you comprehensive access to QuickBooks Online functionality.
+This server provides QuickBooks Online tools to any client conforming to modern
+MCP `2026-07-28` Streamable HTTP and its OAuth profile. It is HTTP-only at
+`POST /mcp`; stdio, the legacy initialization lifecycle, and legacy HTTP+SSE
+are intentionally absent.
 
 ### Key Features
 
-- **145 Total Tools** - Complete coverage of QuickBooks Online API
+- **142 Total Tools** - Complete coverage of QuickBooks Online API
 - **29 Entity Types** - Full CRUD operations (Create, Read, Update, Delete, Search)
 - **11 Financial Reports** - Balance Sheet, P&L, Cash Flow, and more
 - **OAuth 2.0 Authentication** - Secure token-based authentication
 - **TypeScript** - Full type safety with Zod validation
 - **Tested** - Jest test suite with ESM support
 
-> Note: this is a local MCP server. It runs as a stdio subprocess on the developer's or partner's machine and authenticates to a QuickBooks Online company.
-
-> **Before you start:** This MCP server is easy to run once authenticated, but QuickBooks Online integration is gated by Intuit's OAuth app setup. You must register an app on the [Intuit Developer Portal](https://developer.intuit.com) and complete a one-time, browser-based OAuth handshake. **Sandbox** supports `http://localhost` redirect URIs; **production** requires a public HTTPS callback for the initial authorization. After that initial handshake, the server runs locally without further browser interaction (until the 100-day refresh window lapses). See [Authentication](#authentication) for full details.
+Production requires a standards-compliant OAuth authorization server for MCP,
+an Intuit application/company connection, and PostgreSQL. MCP identity and
+Intuit credentials are separate trust domains.
 
 ---
 
@@ -54,53 +57,53 @@ npm run build
 
 ### Configuration
 
-Copy the template `.env.example` to `.env` in the root directory and fill in your values:
+Copy the template and supply the resource URL, authorization-server metadata,
+provider-neutral company-binding claim, PostgreSQL URL, independent encryption
+keys, and Intuit application credentials:
 
 ```bash
 cp .env.example .env
 ```
 
+Generate both 32-byte keys independently with `openssl rand -base64 32`.
+`.env` is gitignored, but deployed secrets should use the platform secret store.
+
+### Remote Streamable HTTP
+
+The executable always starts Streamable HTTP. Startup validates the exact HTTPS
+resource URI, explicit host/origin allowlists, OAuth metadata and verifier,
+caller-to-company binding, PostgreSQL schema/state, and encrypted QuickBooks
+connection. It never opens a browser or writes a token file.
+
 ```env
-QUICKBOOKS_CLIENT_ID=your_client_id
-QUICKBOOKS_CLIENT_SECRET=your_client_secret
-QUICKBOOKS_ENVIRONMENT=sandbox
-QUICKBOOKS_REFRESH_TOKEN=your_refresh_token
-QUICKBOOKS_REALM_ID=your_realm_id
-
-# Optional: restrict which tool categories are registered (default: all enabled)
-# QUICKBOOKS_DISABLE_WRITE=true    # suppress create_* tools
-# QUICKBOOKS_DISABLE_UPDATE=true   # suppress update_* tools
-# QUICKBOOKS_DISABLE_DELETE=true   # suppress delete_* tools
+MCP_HOST=127.0.0.1
+MCP_PORT=3000
+MCP_RESOURCE_URI=https://your-final-host.example/mcp
+MCP_ALLOWED_HOSTS=your-final-host.example
+MCP_ALLOWED_ORIGINS=your-final-client.example
+MCP_AUTH_ISSUER=https://authorization-server.example/issuer
+MCP_AUTH_METADATA_URL=https://authorization-server.example/.well-known/oauth-authorization-server
+MCP_AUTH_JWKS_URL=https://authorization-server.example/jwks
+MCP_AUTH_BINDING_CLAIM=organization_id
+MCP_AUTH_ALLOWED_BINDING_VALUES=authorized-organization-id
+DATABASE_URL=postgresql://...
+MCP_DATA_ENCRYPTION_KEY=...
+MCP_REQUEST_STATE_KEY=...
+QUICKBOOKS_CONNECTION_ID=primary-company
+# Or use MCP_AUTH_INTROSPECTION_URL plus MCP_AUTH_INTROSPECTION_CLIENT_ID/SECRET.
 ```
 
-`.env` is gitignored so your real credentials stay local.
+The configured authorization server protects this resource with
+`quickbooks.read`, `quickbooks.write`, and `quickbooks.delete`. AuthCo is the
+initial deployment choice, not a runtime dependency. See
+[`docs/REMOTE-HTTP.md`](docs/REMOTE-HTTP.md) for durable state, confirmation,
+and deployment validation.
 
-> **Read-only or containerized installs:** the server reads `.env` at startup and writes the rotated refresh token back to it on each refresh. When the installed module sits on a **read-only filesystem** (a container with a read-only root, an immutable/Nix install), set `QUICKBOOKS_TOKEN_STORE_PATH` to an absolute, writable path for both operations. A per-tenant host can also point each connection at its own isolated token file this way. Three things to know: it must be set in the **host process env** (e.g. the `env` block of your MCP server config) — setting it inside `.env` has no effect, because the path is resolved before `.env` is read; it must be an **absolute** path (the server refuses to start otherwise); and when set, the package's own `.env` is not read at all, so any file-based config (including credentials) must live in the file it points to.
+### MCP client integration
 
-### Claude Code Integration
-
-Add to your Claude Code MCP configuration:
-
-```json
-{
-  "mcpServers": {
-    "quickbooks": {
-      "command": "node",
-      "args": ["path/to/mcp-quickbooks-online/dist/index.js"],
-      "env": {
-        "QUICKBOOKS_CLIENT_ID": "your_client_id",
-        "QUICKBOOKS_CLIENT_SECRET": "your_client_secret",
-        "QUICKBOOKS_REFRESH_TOKEN": "your_refresh_token",
-        "QUICKBOOKS_REALM_ID": "your_realm_id",
-        "QUICKBOOKS_ENVIRONMENT": "sandbox",
-        "QUICKBOOKS_DISABLE_WRITE": "false",
-        "QUICKBOOKS_DISABLE_UPDATE": "false",
-        "QUICKBOOKS_DISABLE_DELETE": "false"
-      }
-    }
-  }
-}
-```
+Configure the client with the public `https://your-host.example/mcp` URL. The
+client must implement MCP `2026-07-28` Streamable HTTP, OAuth discovery, and
+multi-round-trip `input_required` for confirmed write/delete calls.
 
 Set any of the `DISABLE_*` flags to `"true"` to prevent that category of tools from being registered. Read tools (`get_*`, `search_*`) are always available.
 
@@ -187,7 +190,7 @@ Complete CRUD operations are available for all entity types:
 | `update_invoice` | Update invoice details |
 | `delete_invoice` | Delete/void an invoice |
 | `search_invoices` | Search invoices with filters |
-| `get_invoice_pdf` | Download an invoice as a PDF (inline base64, or to disk when `QBO_PDF_OUTPUT_DIR` is set) |
+| `get_invoice_pdf` | Download a PDF inline when it is within the 2 MiB remote cap |
 
 </details>
 
@@ -365,49 +368,21 @@ Complete CRUD operations are available for all entity types:
 
 ## Authentication
 
-This server uses OAuth 2.0 to authenticate to a QuickBooks Online company. You'll set up an app on the [Intuit Developer Portal](https://developer.intuit.com/) and connect it to either a **sandbox** (for development) or your **production** QBO company.
+There are two independent OAuth relationships:
 
-### Important: Sandbox vs Production
+1. The configured authorization server authenticates MCP callers and issues a
+   token for the exact `MCP_RESOURCE_URI` audience.
+2. Intuit authorizes this service to one QuickBooks company. Obtain the initial
+   realm and refresh token through an operator-controlled Intuit authorization
+   workflow outside this runtime.
 
-| Mode | When to use | Redirect URI accepted | Setup difficulty |
-|------|-------------|------------------------|------------------|
-| **Sandbox** | Development, testing, demos | `http://localhost:8000/callback` works | Easy |
-| **Production** | Real company data | Localhost **rejected** — must be a public HTTPS URL | Harder (see below) |
-
-If you only want to read your own company's data, you still need to set up an app — Intuit does not offer per-user API keys. There is no shortcut around the OAuth + app-creation flow.
-
-### Sandbox Setup (recommended for first run)
-
-1. Go to the [Intuit Developer Portal](https://developer.intuit.com/) and create a new app
-2. Open the app → **Settings** (left sidebar) → **Redirect URIs** → add: `http://localhost:8000/callback`
-3. Get your **Client ID** and **Client Secret** from the app's **Keys & Credentials** page (Development keys)
-4. Create or use a sandbox company under the **Sandbox** top-level menu item in the dev portal
-5. Set `QUICKBOOKS_ENVIRONMENT=sandbox` in your `.env`
-6. Run `npm run auth` to complete the OAuth handshake — your browser will open, you sign in to the sandbox company, tokens are saved to `.env`
-
-### Production Setup
-
-The Intuit Developer Portal **rejects `http://localhost` redirect URIs in production mode** — every contributor hits this. Two known workarounds:
-
-1. **ngrok tunnel (most common):** run `ngrok http 8000`, then on your Intuit app go to **Settings → Redirect URIs** and add the generated `https://<id>.ngrok-free.app/callback` URL. Use that URL for the OAuth handshake, then revert to localhost afterwards.
-2. **Deploy a small public callback handler** (e.g., on a VPS or serverless function) that captures the auth code and hands it back to your local setup. More involved; only needed if you can't use ngrok.
-
-After completing the production OAuth handshake, the refresh token is what matters — once it's in `.env`, you no longer need the public redirect URL for day-to-day use. Refresh tokens auto-rotate; the server persists the new token on each refresh.
-
-### Once you have tokens
-
-```env
-QUICKBOOKS_CLIENT_ID=your_client_id
-QUICKBOOKS_CLIENT_SECRET=your_client_secret
-QUICKBOOKS_REFRESH_TOKEN=your_refresh_token
-QUICKBOOKS_REALM_ID=your_realm_id
-QUICKBOOKS_ENVIRONMENT=sandbox  # or 'production'
-```
-
-### Common pitfalls
-
-- **`.env` loaded from the wrong directory.** The server resolves `.env` relative to the compiled module, not your shell's CWD. If you launch via Claude Desktop, this matters — make sure you're on current `main`.
-- **Redirect URI mismatch.** The URI you register in the Intuit portal must match **exactly** — protocol, host, port, path. `http://localhost:8000/callback` .
+For first database provision, supply the Intuit environment, realm, and refresh
+token together. After startup creates the connection row, remove the realm and
+refresh token from deployment environment variables. The service thereafter
+loads encrypted state from PostgreSQL and atomically persists every rotation.
+Dead or revoked refresh tokens mark the connection
+`reauthorization_required`; request handling never opens a browser or callback
+listener.
 
 ---
 
@@ -425,7 +400,7 @@ npm run build
 npm test
 ```
 
-The test suite includes **396 tests** with **100% code coverage** across all metrics (statements, branches, functions, lines).
+The test suite includes **531 tests** across 30 suites, with the repository's configured coverage gates passing.
 
 ### Project Structure
 
@@ -439,7 +414,7 @@ src/
 └── index.ts         # Server entry point
 
 tests/
-├── unit/            # Unit tests (396 tests)
+├── unit/            # Unit tests (531 tests)
 │   ├── handlers/    # Handler tests (15 test files)
 │   └── helpers/     # Helper tests
 └── mocks/           # Test mocks

@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { getToolDefinitions } from "../registry.js";
 import { RegisterTool } from "../helpers/register-tool.js";
 import { APPLICATION_VERSION } from "../version.js";
+import type { RuntimeServices } from "../runtime/contracts.js";
 
 export const QUICKBOOKS_SERVER_INFO = {
   name: "QuickBooks Online MCP Server",
@@ -15,15 +16,16 @@ export const QUICKBOOKS_SERVER_INFO = {
  * deployment to one realm), while protocol state is never shared between HTTP
  * requests.
  */
-export function createQuickbooksMcpServer(): McpServer {
+export function createQuickbooksMcpServer(services: RuntimeServices): McpServer {
   const server = new McpServer(QUICKBOOKS_SERVER_INFO, {
     capabilities: {
       tools: {},
     },
+    requestState: { verify: services.requestStateCodec.verify },
   });
 
   for (const definition of getToolDefinitions()) {
-    RegisterTool(server, definition);
+    RegisterTool(server, definition, services);
   }
 
   return server;

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Summary
 
-Comprehensive expansion of the QuickBooks Online MCP server from a basic implementation to a full-featured API integration with **143 tools**, **29 entity types**, **11 financial reports**, and **100% test coverage**.
+Comprehensive expansion of the QuickBooks Online MCP server from a basic implementation to a full-featured API integration with **142 tools**, **29 entity types**, **11 financial reports**, and **100% test coverage**.
 
 ---
 
@@ -94,7 +94,7 @@ Added 11 financial report endpoints:
 #### Documentation
 
 - Comprehensive `README.md` with:
-  - Badge indicators (143 tools, 29 entities, 11 reports)
+  - Badge indicators (142 tools, 29 entities, 11 reports)
   - Complete tool reference with collapsible sections
   - Quick start guide with installation instructions
   - Claude Code MCP configuration examples
@@ -322,6 +322,31 @@ If upgrading from the original Intuit implementation:
 ---
 
 ## [Unreleased]
+
+### Added
+
+- Stateless MCP `2026-07-28` Streamable HTTP at `POST /mcp`, protected by
+  provider-neutral OAuth resource-server metadata, bearer verification, and explicit
+  read/write/delete scope enforcement.
+- Modern protocol, authorization, tool-registry, and HTTP boundary smoke gates.
+- PostgreSQL-backed encrypted QuickBooks connection state, distributed refresh
+  locking, shared rate limits, and a durable mutation operation ledger.
+- HMAC-bound multi-round-trip confirmation for every write/delete operation.
+
+### Changed
+
+- Migrated from the monolithic MCP v1 SDK to pinned v2 server, Node, and Express
+  packages. The runtime now serves modern Streamable HTTP only.
+- QuickBooks access and rotated refresh tokens are atomically encrypted in
+  PostgreSQL before use; file persistence and interactive browser fallback are
+  no longer runtime behaviors.
+
+### Removed
+
+- Legacy MCP initialization, legacy HTTP+SSE, session behavior, deprecated
+  `.tool()` registration, and the singleton server compatibility wrapper.
+- MCP stdio serving, token-store files, local callback/browser authentication,
+  and remote server-filesystem tool arguments.
 
 ### Planned
 

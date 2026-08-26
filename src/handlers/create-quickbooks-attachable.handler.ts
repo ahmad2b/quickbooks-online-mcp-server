@@ -1,13 +1,8 @@
 import https from "https";
-import { createReadStream } from "fs";
 import { QuickbooksClient } from "../clients/quickbooks-client.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
-import {
-  fetchUrlToTempFile,
-  inferContentType,
-  resolveLocalFile,
-} from "../helpers/attachable-file-source.js";
+import { inferContentType } from "../helpers/infer-content-type.js";
 
 // QBO Attachable upload — file types accepted by the QBO /upload endpoint.
 // Source: developer.intuit.com Attachable API reference (16 unique MIME types
@@ -41,10 +36,11 @@ const ALLOWED_UPLOAD_CONTENT_TYPES = new Set([
   "text/xml",                        // .xml
 ]);
 
-// QBO documents a 100 MB per-request cap on /upload. We enforce client-side
-// BEFORE allocating Buffer.from(base64) so an unbounded base64 string cannot
-// be decoded into memory.
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+// Remote MCP requests must remain within the configured HTTP body limit after
+// base64 expansion and JSON framing. Larger artifacts require the future
+// private ArtifactStore adapter; they are not accepted through process files,
+// arbitrary URLs, or oversized inline bodies.
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 
 // Approximate decoded size of a base64 string without decoding it. base64
 // expands 3 bytes -> 4 chars; subtract padding to get the decoded length.
@@ -59,8 +55,6 @@ export interface CreateAttachableInput {
   category?: string;
   content_type?: string;
   base64_content?: string;
-  file_path?: string;
-  file_url?: string;
   attachable_ref?: {
     entity_ref_type: string;
     entity_ref_value: string;
@@ -68,10 +62,9 @@ export interface CreateAttachableInput {
   };
 }
 
-// The file part of the multipart body: either bytes already in memory
-// (base64 path) or a local file streamed from disk (file_path / file_url,
-// the latter spooled to a temp file by the fetch helper).
-type UploadFileSource = { buffer: Buffer } | { path: string; size: number };
+// Remote HTTP accepts only bounded inline bytes. Host filesystem paths and
+// arbitrary server-side URL downloads are not part of the tool contract.
+type UploadFileSource = { buffer: Buffer };
 
 function sanitizeFilename(name: string): string {
   return name.replace(/[\r\n"\\]/g, "_");
@@ -124,7 +117,7 @@ async function uploadAttachableFile(
   const closer = Buffer.from(`\r\n--${boundary}--\r\n`);
   // Exact Content-Length lets us stream the file part without chunked
   // transfer encoding, which the QBO endpoint does not reliably accept.
-  const fileSize = "buffer" in file ? file.buffer.length : file.size;
+  const fileSize = file.buffer.length;
   const contentLength = preamble.length + fileSize + closer.length;
 
   const host = isSandbox
@@ -151,14 +144,14 @@ async function uploadAttachableFile(
         res.on("end", () => {
           const responseText = Buffer.concat(chunks).toString("utf-8");
           if (res.statusCode && res.statusCode >= 400) {
-            console.error(`[qbo-attachable-upload] QBO ${res.statusCode}: ${responseText}`);
+            console.error(`[qbo-attachable-upload] QBO request failed with status ${res.statusCode}`);
             reject(new Error(redactedUploadError(res.statusCode)));
             return;
           }
           try {
             resolve(JSON.parse(responseText) as unknown);
           } catch {
-            console.error(`[qbo-attachable-upload] QBO ${res.statusCode} non-JSON: ${responseText}`);
+            console.error(`[qbo-attachable-upload] QBO returned a non-JSON response with status ${res.statusCode}`);
             reject(new Error(redactedUploadError(res.statusCode)));
           }
         });
@@ -170,43 +163,9 @@ async function uploadAttachableFile(
     });
 
     req.write(preamble);
-    if ("buffer" in file) {
-      req.write(file.buffer);
-      req.write(closer);
-      req.end();
-    } else {
-      // Stream the file part from disk — memory stays flat for large files.
-      // The read is bounded to the stat'ed size so a file that GROWS between
-      // stat and read cannot overrun the declared Content-Length; a file that
-      // SHRINKS is caught by the bytesRead check below.
-      const readStream = createReadStream(file.path, { end: file.size - 1 });
-      /* istanbul ignore next — defensive: fires only on network failure
-         mid-stream; prevents the unpiped read stream from leaking its fd. */
-      req.on("error", () => readStream.destroy());
-      /* istanbul ignore next — defensive: the file was stat'ed moments ago;
-         this fires only if it vanishes or the disk errors mid-read. */
-      readStream.on("error", (err) => {
-        console.error(`[qbo-attachable-upload] file read error: ${err.message}`);
-        req.destroy(err);
-        reject(new Error(`Failed reading file for upload: ${err.message}`));
-      });
-      readStream.pipe(req, { end: false });
-      readStream.on("end", () => {
-        /* istanbul ignore next — defensive: file truncated between stat and
-           read; without this check QBO would wait for bytes that never come. */
-        if (readStream.bytesRead !== file.size) {
-          req.destroy();
-          reject(
-            new Error(
-              `File changed during upload: read ${readStream.bytesRead} of ${file.size} expected bytes.`
-            )
-          );
-          return;
-        }
-        req.write(closer);
-        req.end();
-      });
-    }
+    req.write(file.buffer);
+    req.write(closer);
+    req.end();
   });
 }
 
@@ -233,32 +192,10 @@ export async function createQuickbooksAttachable(
     }
 
     // ── Binary upload path ────────────────────────────────────────────────
-    // Source precedence: file_url / file_path (mutually exclusive) win over
-    // base64_content; base64_content alone preserves the original behavior.
-    if (data.file_url && data.file_path) {
-      return {
-        result: null,
-        isError: true,
-        error: "Provide either file_url or file_path, not both.",
-      };
-    }
-
-    const hasFileSource = Boolean(data.file_url || data.file_path || data.base64_content);
+    const hasFileSource = Boolean(data.base64_content);
     if (hasFileSource) {
-      // Resolve the file source first (cheap, no auth), then validate type.
       let fileSource: UploadFileSource;
-      let fetchedContentType: string | null = null;
-      let cleanup: (() => Promise<void>) | null = null;
-
-      if (data.file_url) {
-        const fetched = await fetchUrlToTempFile(data.file_url, MAX_UPLOAD_BYTES);
-        fileSource = { path: fetched.path, size: fetched.size };
-        fetchedContentType = fetched.contentTypeHeader;
-        cleanup = fetched.cleanup;
-      } else if (data.file_path) {
-        const local = await resolveLocalFile(data.file_path, MAX_UPLOAD_BYTES);
-        fileSource = { path: local.path, size: local.size };
-      } else {
+      {
         // base64 path — validate the content type BEFORE decoding, so an
         // unsupported type is rejected without allocating the decoded buffer
         // (same error precedence as the original implementation).
@@ -277,7 +214,7 @@ export async function createQuickbooksAttachable(
           return {
             result: null,
             isError: true,
-            error: `File too large: approximately ${approxSize} bytes exceeds QBO's ${MAX_UPLOAD_BYTES} byte (100 MB) upload limit.`,
+            error: `File too large for inline remote upload: approximately ${approxSize} bytes exceeds ${MAX_UPLOAD_BYTES} bytes.`,
           };
         }
         const fileBuffer = Buffer.from(data.base64_content!, "base64");
@@ -288,27 +225,17 @@ export async function createQuickbooksAttachable(
           return {
             result: null,
             isError: true,
-            error: `File too large: ${fileBuffer.length} bytes exceeds QBO's ${MAX_UPLOAD_BYTES} byte (100 MB) upload limit.`,
+            error: `File too large for inline remote upload: ${fileBuffer.length} bytes exceeds ${MAX_UPLOAD_BYTES} bytes.`,
           };
         }
         fileSource = { buffer: fileBuffer };
       }
 
-      try {
-        // Content type: explicit override > inferred from file_name /
-        // file_path / file_url PATH extension (query strings excluded so
-        // '?file=x.pdf' can't spoof the type). The URL's Content-Type header
-        // is deliberately not trusted as-is — servers routinely send
-        // octet-stream — but a QBO-supported header value (case-insensitive
-        // per RFC 2045) is accepted as a last resort.
-        const urlPathname = data.file_url ? new URL(data.file_url).pathname : undefined;
-        const headerToken = fetchedContentType
-          ? fetchedContentType.split(";")[0].trim().toLowerCase()
-          : null;
+      {
+        // Content type: explicit override, then inference from file_name.
         const effectiveContentType =
           data.content_type ??
-          inferContentType(data.file_name, data.file_path, urlPathname) ??
-          (headerToken && ALLOWED_UPLOAD_CONTENT_TYPES.has(headerToken) ? headerToken : null) ??
+          inferContentType(data.file_name) ??
           "application/octet-stream";
         if (!ALLOWED_UPLOAD_CONTENT_TYPES.has(effectiveContentType)) {
           return {
@@ -329,8 +256,6 @@ export async function createQuickbooksAttachable(
           isSandbox
         );
         return { result: uploadResult, isError: false, error: null };
-      } finally {
-        if (cleanup) await cleanup();
       }
     }
 

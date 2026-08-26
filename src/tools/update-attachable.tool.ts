@@ -4,7 +4,7 @@ import { z } from "zod";
 
 const toolName = "update_attachable";
 const toolDescription =
-  "Update an existing attachable's metadata (file name, note, category, content type) in QuickBooks Online. This is metadata-only: it CANNOT replace the uploaded file bytes. To attach a different or corrected file, create a new attachable (create_attachable with file_path) and delete the old one.";
+  "Update an existing attachable's metadata in QuickBooks Online. This cannot replace uploaded file bytes; create a new attachable and delete the old one to replace content.";
 const toolSchema = z.object({
   id: z.string().min(1).describe("Attachable ID"),
   sync_token: z.string().min(1).describe("Sync token for concurrency"),
@@ -12,8 +12,7 @@ const toolSchema = z.object({
   content_type: z.string().optional().describe("Updated MIME content type metadata."),
   note: z.string().optional().describe("Updated note"),
   category: z.string().optional().describe("Updated category"),
-  file_path: z.string().optional().describe("Convenience: derive file_name and content_type metadata from this path. Metadata-only — does NOT read or re-upload file bytes."),
-});
+}).strict();
 
 const toolHandler = async ({ params }: any) => {
   const response = await updateQuickbooksAttachable(params);

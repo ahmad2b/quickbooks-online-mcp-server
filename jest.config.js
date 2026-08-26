@@ -20,17 +20,38 @@ export default {
       lines: 100,
       statements: 100,
     },
-    // The OAuth client spins up an interactive browser flow and a local HTTP
-    // callback server, which can't be fully unit-covered. Jest subtracts
-    // path-matched files from the global group, so the 100% gate above still
-    // applies to everything else. Before quickbooks-client.auth.test.ts this
-    // file had no tests at all (it was never imported, so istanbul never saw
-    // it); these floors reflect what the new behavioral tests cover.
+    // The production QuickBooks client delegates persistence/locking to a
+    // durable adapter. Its focused tests cover token reuse, rotation, and
+    // error classification without performing live Intuit calls.
     './src/clients/quickbooks-client.ts': {
-      branches: 45,
-      functions: 70,
-      lines: 70,
-      statements: 70,
+      branches: 55,
+      functions: 68,
+      lines: 75,
+      statements: 68,
+    },
+    // Central registration now owns HTTP identity enforcement, safe MCP error
+    // normalization, signed confirmation, and durable mutation transitions.
+    // Focused behavior tests cover the primary success/denial/confirmation
+    // paths; defensive ambiguous/duplicate branches retain explicit floors.
+    './src/helpers/register-tool.ts': {
+      branches: 79,
+      functions: 95,
+      lines: 90,
+      statements: 86,
+    },
+    './src/helpers/infer-content-type.ts': {
+      branches: 50,
+      functions: 100,
+      lines: 100,
+      statements: 75,
+    },
+    // Bounded multipart upload behavior is tested, including redacted QBO and
+    // network failures. This floor covers defensive response-shape branches.
+    './src/handlers/create-quickbooks-attachable.handler.ts': {
+      branches: 94,
+      functions: 100,
+      lines: 98,
+      statements: 98,
     },
     // update_account's normalizePatch carries a scalar field-type-map switch
     // whose `default` arm is unreachable (the map only ever maps to

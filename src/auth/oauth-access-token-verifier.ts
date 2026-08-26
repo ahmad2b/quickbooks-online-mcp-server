@@ -20,6 +20,13 @@ function invalidToken(message = "The access token is invalid"): OAuthError {
   return new OAuthError(OAuthErrorCode.InvalidToken, message);
 }
 
+function verificationUnavailable(): OAuthError {
+  return new OAuthError(
+    OAuthErrorCode.TemporarilyUnavailable,
+    "The authorization server is temporarily unavailable",
+  );
+}
+
 function stringScopes(payload: Record<string, unknown>): string[] {
   const scope = payload.scope;
   if (typeof scope === "string") return scope.split(/\s+/).filter(Boolean);
@@ -46,10 +53,11 @@ function authInfoFromPayload(token: string, payload: JWTPayload, resourceUri: st
     ? claims.client_id
     : typeof claims.azp === "string" && claims.azp.length > 0
       ? claims.azp
-    : typeof payload.sub === "string" && payload.sub.length > 0
-      ? payload.sub
       : undefined;
-  if (!clientId) throw invalidToken("The access token has no principal");
+  if (!clientId) throw invalidToken("The access token has no client identity");
+  if (typeof payload.sub !== "string" || payload.sub.length === 0) {
+    throw invalidToken("The access token has no subject identity");
+  }
 
   return {
     token,
@@ -57,7 +65,10 @@ function authInfoFromPayload(token: string, payload: JWTPayload, resourceUri: st
     scopes: stringScopes(payload as Record<string, unknown>),
     expiresAt: payload.exp,
     resource: new URL(resourceUri),
-    extra: { issuer },
+    // Preserve subject, client, and provider-specific tenant claims as distinct
+    // inputs to the provider-neutral authorization policy. Never collapse sub
+    // into clientId: they represent different security principals.
+    extra: { issuer, claims: { ...payload, client_id: claims.client_id, azp: claims.azp } },
   };
 }
 
@@ -85,10 +96,11 @@ function assertIntrospectionPayload(
     ? payload.client_id
     : typeof payload.azp === "string" && payload.azp.length > 0
       ? payload.azp
-    : typeof payload.sub === "string" && payload.sub.length > 0
-      ? payload.sub
       : undefined;
-  if (!clientId) throw invalidToken("The access token has no principal");
+  if (!clientId) throw invalidToken("The access token has no client identity");
+  if (typeof payload.sub !== "string" || payload.sub.length === 0) {
+    throw invalidToken("The access token has no subject identity");
+  }
 
   return {
     token,
@@ -96,7 +108,7 @@ function assertIntrospectionPayload(
     scopes: stringScopes(payload),
     expiresAt: payload.exp,
     resource: new URL(options.resourceUri),
-    extra: { issuer: options.issuer },
+    extra: { issuer: options.issuer, claims: { ...payload, iss: options.issuer } },
   };
 }
 
@@ -158,13 +170,14 @@ export class OAuthAccessTokenVerifier implements OAuthTokenVerifier {
         body: new URLSearchParams({ token, token_type_hint: "access_token" }),
         signal: controller.signal,
       });
-      if (!response.ok) throw invalidToken();
+      if (response.status === 400 || response.status === 401) throw invalidToken();
+      if (!response.ok) throw verificationUnavailable();
       const payload: unknown = await response.json();
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw invalidToken();
       return assertIntrospectionPayload(token, payload as Record<string, unknown>, this.options);
     } catch (error) {
       if (OAuthError.isInstance(error)) throw error;
-      throw invalidToken();
+      throw verificationUnavailable();
     } finally {
       clearTimeout(timeout);
     }

@@ -24,11 +24,11 @@ The QuickBooks Online MCP Server is a Model Context Protocol (MCP) server that e
 
 | Metric | Value |
 |--------|-------|
-| Total Tools | 143 |
+| Total Tools | 142 |
 | Entity Types | 29 |
 | Financial Reports | 11 |
 | Handler Files | 87 |
-| Test Coverage | 100% |
+| Protocol | MCP `2026-07-28` only |
 
 ---
 
@@ -40,11 +40,11 @@ The QuickBooks Online MCP Server is a Model Context Protocol (MCP) server that e
 │                    (Claude Code / IDE)                           │
 └─────────────────────────────────────────────────────────────────┘
                                 │
-                                │ MCP Protocol (stdio)
+                                │ MCP 2026-07-28 Streamable HTTP over HTTPS
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                         MCP Server                               │
-│                        (src/index.ts)                            │
+│                (src/index.ts + server factory)                   │
 │  ┌─────────────────────────────────────────────────────────┐    │
 │  │                    Tool Registry                         │    │
 │  │              (src/tools/*.tool.ts)                       │    │
@@ -72,7 +72,8 @@ The QuickBooks Online MCP Server is a Model Context Protocol (MCP) server that e
 │  │                                                          │    │
 │  │  • OAuth 2.0 Token Management                           │    │
 │  │  • Token Refresh                                         │    │
-│  │  • Environment Configuration                             │    │
+│  │  • PostgreSQL distributed refresh lock                   │    │
+│  │  • Encrypted atomic token rotation                       │    │
 │  └─────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
                                 │
@@ -90,15 +91,17 @@ The QuickBooks Online MCP Server is a Model Context Protocol (MCP) server that e
 
 ```
 src/
-├── index.ts                    # MCP server entry point
-│                               # - Registers all tools
-│                               # - Handles MCP protocol communication
+├── index.ts                    # HTTP-only Node listener entry
+├── registry.ts                 # Deterministic 142-tool registry
+├── http-server.ts              # Stateless Streamable HTTP boundary
+├── http-config.ts              # Fail-closed HTTP/QBO configuration
+├── auth/                       # Provider-neutral token verifier and metadata loader
+├── runtime/                    # Ports, policy, encryption, PostgreSQL adapters
 │
 ├── clients/
 │   └── quickbooks-client.ts    # QuickBooks API client wrapper
 │                               # - OAuth token management
-│                               # - Authentication flow
-│                               # - Environment switching (sandbox/production)
+│                               # - Durable token refresh only; no browser/file flow
 │
 ├── handlers/                   # Business logic layer (87 files)
 │   ├── create-quickbooks-*.ts  # Create operations (14 files)
@@ -126,49 +129,26 @@ src/
 
 ### 1. MCP Server Entry Point (`src/index.ts`)
 
-The main server file:
-- Initializes the MCP server
-- Registers all 143 tools with their schemas
-- Routes tool invocations to appropriate handlers
-- Manages the MCP stdio transport
+The main server file starts the HTTP listener and delegates MCP protocol
+behavior to the strict-modern official handler and all tools to the shared
+registry/factory.
 
 ```typescript
 // Simplified structure
-const server = new McpServer({ name: 'quickbooks-online', version: '0.0.1' });
-
-// Tool registration pattern
-server.tool(
-  'create_payment',
-  'Create a new payment',
-  createPaymentSchema,
-  async (args) => createQuickbooksPayment(args)
-);
-
-// Start server
-await server.start();
+createMcpHandler(factory, { legacy: 'reject', responseMode: 'json' });
 ```
 
 ### 2. QuickBooks Client (`src/clients/quickbooks-client.ts`)
 
-Wraps the `node-quickbooks` library:
+Wraps the `node-quickbooks` library and requires a durable connection store.
+The refresh path obtains a PostgreSQL transaction/advisory lock, rereads the
+latest tokens, and persists any rotation atomically before use.
 
 ```typescript
-class QuickBooksClient {
-  private quickbooks: QuickBooks | null = null;
-
-  async authenticate(): Promise<void> {
-    // 1. Check if already authenticated
-    // 2. Initialize QuickBooks instance with OAuth tokens
-    // 3. Handle token refresh if needed
-  }
-
-  getQuickbooks(): QuickBooks {
-    if (!this.quickbooks) throw new Error('Not authenticated');
-    return this.quickbooks;
-  }
-}
-
-export const quickbooksClient = new QuickBooksClient();
+await connectionStore.withRefreshLock(connectionId, async (current, persist) => {
+  const refreshed = await intuit.refreshUsingToken(current.refreshToken);
+  await persist(refreshed); // atomic access + rotated refresh token
+});
 ```
 
 ### 3. Handlers (`src/handlers/*.handler.ts`)
@@ -272,7 +252,7 @@ export async function createQuickbooksPayment(
 
 ## Tool Registration
 
-Tools are registered in `src/index.ts`:
+Tools are registered once by `src/server/qbo-mcp-server.ts` from the deterministic `src/registry.ts`. The central adapter exposes SDK v2 `registerTool()` while wrapping the existing handlers' `{ params }` input internally:
 
 ```typescript
 // Tool registration connects:
@@ -281,18 +261,11 @@ Tools are registered in `src/index.ts`:
 // 3. Schema (Zod validation)
 // 4. Handler (business logic)
 
-server.tool(
+server.registerTool(
   'create_payment',
-  'Create a new customer payment in QuickBooks',
-  z.object({
-    customer_ref: z.string().describe('Customer ID'),
-    total_amt: z.number().describe('Payment amount'),
-    payment_method_ref: z.string().optional(),
-    txn_date: z.string().optional(),
-    private_note: z.string().optional(),
-  }),
-  async (args) => {
-    const result = await createQuickbooksPayment(args);
+  { description: 'Create a new customer payment in QuickBooks', inputSchema: paymentSchema, annotations: { destructiveHint: true, openWorldHint: true } },
+  async (args, context) => {
+    const result = await createQuickbooksPayment({ params: args }, context);
     return {
       content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
     };

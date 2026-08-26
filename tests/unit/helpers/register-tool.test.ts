@@ -9,6 +9,46 @@ import {
 } from "../../../src/helpers/register-tool";
 import { z } from "zod";
 import type { ToolDefinition } from "../../../src/types/tool-definition";
+import type { RuntimeServices } from "../../../src/runtime/contracts";
+
+function runtimeServices(): RuntimeServices {
+  return {
+    connectionId: "primary",
+    connectionStore: {} as RuntimeServices["connectionStore"],
+    rateLimiter: {} as RuntimeServices["rateLimiter"],
+    authorizationPolicy: {
+      authorize: jest.fn(() => ({
+        allowed: true as const,
+        identity: { issuer: "https://issuer", subject: "user", clientId: "client", claims: {} },
+      })),
+    },
+    operations: {
+      prepare: jest.fn(async (operation: { id: string }) => ({
+        created: true,
+        operationId: operation.id,
+        status: "prepared" as const,
+      })),
+      transition: jest.fn(async () => true),
+      recoverStale: jest.fn(async () => 0),
+    },
+    requestStateCodec: {
+      mint: jest.fn(async () => "signed-state"),
+      verify: jest.fn(async () => ({ operationId: "op", toolName: "create_invoice", inputHash: "hash" })),
+    },
+  };
+}
+
+function authContext(overrides: Record<string, unknown> = {}) {
+  const claims = { iss: "https://issuer", sub: "user", client_id: "client", organization_id: "org", ...overrides };
+  return {
+    http: { authInfo: { scopes: ["quickbooks.read", "quickbooks.write", "quickbooks.delete"], extra: { claims } } },
+    mcpReq: {
+      method: "tools/call",
+      requestState: () => undefined,
+      inputResponses: undefined,
+    },
+  };
+}
 
 // ── getCrudCategory ──────────────────────────────────────────────────────────
 // Verifies that every verb prefix maps to the correct CRUD category string.
@@ -49,13 +89,14 @@ describe("authority metadata", () => {
     expect(() => materializeToolDefinition({ ...base, name: "unknown_invoice" })).toThrow(/no recognized authority/);
   });
 
-  it("allows local context and enforces complete HTTP scopes", () => {
+  it("fails closed without HTTP context and enforces complete HTTP scopes", () => {
     const schema = z.object({ id: z.string() });
     const handler = jest.fn() as ToolDefinition<typeof schema>["handler"];
     const definition = materializeToolDefinition({ name: "delete_invoice", description: "delete", schema, handler });
-    expect(authorizeToolContext(definition, undefined)).toEqual({ allowed: true });
-    expect(authorizeToolContext(definition, { http: { authInfo: { scopes: ["quickbooks.read"] } } }).allowed).toBe(false);
-    expect(authorizeToolContext(definition, { http: { authInfo: { scopes: ["quickbooks.read", "quickbooks.delete"] } } })).toEqual({ allowed: true });
+    const services = runtimeServices();
+    expect(authorizeToolContext(definition, undefined, services).allowed).toBe(false);
+    expect(authorizeToolContext(definition, { http: { authInfo: { scopes: ["quickbooks.read"] } } }, services).allowed).toBe(false);
+    expect(authorizeToolContext(definition, authContext(), services)).toEqual({ allowed: true });
   });
 });
 
@@ -184,17 +225,89 @@ describe("RegisterTool", () => {
         callback = registered;
       }),
     };
-    const d = def("create_invoice");
-    expect(RegisterTool(server, d)).toBe(true);
+    const d = def("get_invoice");
+    const services = runtimeServices();
+    expect(RegisterTool(server, d, services)).toBe(true);
     expect(server.registerTool).toHaveBeenCalledWith(
       d.name,
-      expect.objectContaining({ annotations: expect.objectContaining({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }) }),
+      expect.objectContaining({ annotations: expect.objectContaining({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }) }),
       expect.any(Function),
     );
-    await callback?.({ id: "123" }, { http: { authInfo: { scopes: ["quickbooks.read"] } } });
+    await callback?.({ id: "123" }, { http: { authInfo: { scopes: [] } } });
     expect(handler).not.toHaveBeenCalled();
-    await callback?.({ id: "123" }, { http: { authInfo: { scopes: ["quickbooks.read", "quickbooks.write"] } } });
+    await callback?.({ id: "123" }, authContext());
     expect(handler).toHaveBeenLastCalledWith({ params: { id: "123" } }, expect.anything());
+  });
+
+  it("requires signed multi-round-trip confirmation and records mutation outcome", async () => {
+    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
+    const server = {
+      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
+        callback = registered;
+      }),
+    };
+    const services = runtimeServices();
+    const mutationHandler = jest.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    RegisterTool(server, {
+      name: "create_invoice",
+      description: "create",
+      schema,
+      handler: mutationHandler,
+    }, services);
+
+    const first = await callback?.({ id: "123" }, authContext());
+    expect(first.resultType).toBe("input_required");
+    expect(services.operations.prepare).toHaveBeenCalledTimes(1);
+    expect(mutationHandler).not.toHaveBeenCalled();
+
+    const prepared = (services.operations.prepare as jest.Mock).mock.calls[0][0] as { id: string; inputHash: string };
+    const retry = authContext() as any;
+    retry.mcpReq.requestState = () => ({
+      operationId: prepared.id,
+      toolName: "create_invoice",
+      inputHash: prepared.inputHash,
+    });
+    retry.mcpReq.inputResponses = {
+      confirm: { action: "accept", content: { confirm: true } },
+    };
+    const result = await callback?.({ id: "123" }, retry);
+
+    expect(result.content[0].text).toBe("created");
+    expect(mutationHandler).toHaveBeenCalledTimes(1);
+    expect(services.operations.transition).toHaveBeenLastCalledWith(
+      prepared.id,
+      ["executing"],
+      "succeeded",
+    );
+  });
+
+  it("blocks a duplicate unresolved mutation before requesting confirmation", async () => {
+    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
+    const server = {
+      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
+        callback = registered;
+      }),
+    };
+    const services = runtimeServices();
+    (services.operations.prepare as any).mockResolvedValue({
+      created: false,
+      operationId: "existing-operation",
+      status: "unknown",
+    });
+    const mutationHandler = jest.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    RegisterTool(server, {
+      name: "create_invoice",
+      description: "create",
+      schema,
+      handler: mutationHandler,
+    }, services);
+
+    const result = await callback?.({ id: "123" }, authContext());
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("existing-operation");
+    expect(mutationHandler).not.toHaveBeenCalled();
+    expect(services.requestStateCodec.mint).not.toHaveBeenCalled();
   });
 
   it("rejects unsupported servers and honors disable policy before registration", () => {

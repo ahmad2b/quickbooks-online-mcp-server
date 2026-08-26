@@ -32,6 +32,8 @@ import { loadOAuthMetadata } from "./auth/oauth-metadata.js";
 import { OAuthAccessTokenVerifier } from "./auth/oauth-access-token-verifier.js";
 import type { ToolAuthority } from "./types/tool-definition.js";
 import { APPLICATION_VERSION } from "./version.js";
+import type { RuntimeServices } from "./runtime/contracts.js";
+import { createProductionRuntime } from "./runtime/production-runtime.js";
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 const WINDOW_MS = 60_000;
@@ -68,6 +70,7 @@ export type HttpAppOptions = {
   shutdownTimeoutMs?: number;
   /** Resolver backed by the executable registry; absent means fail closed. */
   toolAuthority?: (name: string) => ToolAuthority | undefined;
+  services: RuntimeServices;
 };
 
 export type HttpApp = {
@@ -82,13 +85,6 @@ export type HttpApp = {
 export type HttpServerHandle = HttpApp & {
   server: http.Server;
   close: () => Promise<void>;
-};
-
-export type QuickBooksPreflight = () => Promise<void>;
-
-type RateBucket = {
-  startedAt: number;
-  count: number;
 };
 
 function stableIdentifier(value: string | undefined): string {
@@ -238,33 +234,52 @@ function makeRateLimitMiddleware(
   config: HttpConfig,
   now: () => number,
   resolver: ((name: string) => ToolAuthority | undefined) | undefined,
+  services: RuntimeServices,
 ) {
-  const buckets = new Map<string, RateBucket>();
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const authInfo = req.auth;
     if (!authInfo) {
       next();
       return;
     }
 
-    const current = now();
-    if (buckets.size > 10_000) {
-      for (const [bucketKey, bucketValue] of buckets) {
-        if (current - bucketValue.startedAt >= WINDOW_MS) buckets.delete(bucketKey);
+    try {
+      const claims = authInfo.extra?.claims;
+      const claimRecord = claims && typeof claims === "object" && !Array.isArray(claims)
+        ? claims as Record<string, unknown>
+        : {};
+      const identityKey = [claimRecord.iss, claimRecord.sub, claimRecord.client_id ?? claimRecord.azp]
+        .map((value) => stableIdentifier(typeof value === "string" ? value : undefined))
+        .join(":");
+      const key = `${identityKey}:${stableIdentifier(services.connectionId)}:${authorityClass(req, resolver)}`;
+      const decision = await services.rateLimiter.consume(
+        key,
+        config.rateLimitPerMinute,
+        WINDOW_MS,
+        now(),
+      );
+      if (!decision.allowed) {
+        res.setHeader("Retry-After", String(decision.retryAfterSeconds));
+        sendJsonRpcError(req, res, 429, -32000, "Too many requests");
+        return;
       }
+      next();
+    } catch {
+      sendJsonRpcError(req, res, 503, -32603, "Rate-limit service unavailable");
     }
-    const key = `${stableIdentifier(authInfo.clientId)}:${authorityClass(req, resolver)}`;
-    const prior = buckets.get(key);
-    const bucket = !prior || current - prior.startedAt >= WINDOW_MS
-      ? { startedAt: current, count: 0 }
-      : prior;
-    bucket.count += 1;
-    buckets.set(key, bucket);
+  };
+}
 
-    if (bucket.count > config.rateLimitPerMinute) {
-      const retryAfter = Math.max(1, Math.ceil((bucket.startedAt + WINDOW_MS - current) / 1000));
-      res.setHeader("Retry-After", String(retryAfter));
-      sendJsonRpcError(req, res, 429, -32000, "Too many requests");
+function makeCompanyBindingMiddleware(services: RuntimeServices) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const claims = req.auth?.extra?.claims;
+    const decision = services.authorizationPolicy.authorize(
+      claims && typeof claims === "object" && !Array.isArray(claims)
+        ? claims as Record<string, unknown>
+        : {},
+    );
+    if (!decision.allowed) {
+      sendJsonRpcError(req, res, 403, -32001, "The caller is not authorized for this resource");
       return;
     }
     next();
@@ -327,8 +342,9 @@ function makeRequestLogger(
   };
 }
 
-function defaultServerFactory(): Promise<Awaited<ReturnType<McpServerFactory>>> {
-  return import("./server/qbo-mcp-server.js").then(({ createQuickbooksMcpServer }) => createQuickbooksMcpServer());
+function defaultServerFactory(services: RuntimeServices): McpServerFactory {
+  return () => import("./server/qbo-mcp-server.js")
+    .then(({ createQuickbooksMcpServer }) => createQuickbooksMcpServer(services));
 }
 
 /**
@@ -354,7 +370,7 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
     introspectionClientSecret: options.config.authIntrospectionClientSecret,
   });
   const handler = createMcpHandler(
-    options.serverFactory ?? defaultServerFactory,
+    options.serverFactory ?? defaultServerFactory(options.services),
     {
       legacy: "reject",
       responseMode: "json",
@@ -399,7 +415,8 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.config.resourceUri),
   });
   const scope = makeScopeMiddleware(options.config, toolAuthority);
-  const rateLimit = makeRateLimitMiddleware(options.config, now, toolAuthority);
+  const companyBinding = makeCompanyBindingMiddleware(options.services);
+  const rateLimit = makeRateLimitMiddleware(options.config, now, toolAuthority, options.services);
   const nodeHandler = toNodeHandler(handler, {
     onerror: (error) => {
       process.stderr.write(`{"event":"mcp_node_handler_error","type":"${error.name}"}\n`);
@@ -417,20 +434,24 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
       return;
     }
     state.inFlight += 1;
-    const timeout = setTimeout(() => {
-      if (!res.headersSent) sendJsonRpcError(req, res, 408, -32000, "Request timed out");
-      // The Node adapter ties its AbortSignal to the response close event;
-      // destroy the request after the bounded response so a slow handler is
-      // cancelled instead of continuing after the client has timed out.
-      req.destroy();
-    }, options.config.requestTimeoutMs);
-    timeout.unref();
+    // Application-enforced cancellation is safe for reads. It is deliberately
+    // not applied after dispatching a financial mutation: terminating the HTTP
+    // request cannot cancel a QuickBooks commit and would create a false retry
+    // signal. Mutation outcomes are instead recorded in the durable ledger.
+    const readRequest = authorityClass(req, toolAuthority) === "read";
+    const timeout = readRequest
+      ? setTimeout(() => {
+          if (!res.headersSent) sendJsonRpcError(req, res, 408, -32000, "Request timed out");
+          req.destroy();
+        }, options.config.requestTimeoutMs)
+      : undefined;
+    timeout?.unref();
     res.once("finish", () => {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       state.inFlight = Math.max(0, state.inFlight - 1);
     });
     next();
-  }, bearer, rateLimit, scope, async (req: Request, res: Response, next: NextFunction) => {
+  }, bearer, companyBinding, rateLimit, scope, async (req: Request, res: Response, next: NextFunction) => {
     try {
       await nodeHandler(req, res, req.body);
     } catch (error) {
@@ -478,13 +499,12 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
  * marker before any QuickBooks request can be dispatched.
  */
 export async function startHttpServer(
-  options: Partial<Omit<HttpAppOptions, "config" | "oauthMetadata" | "tokenVerifier">> & {
+  options: Partial<Omit<HttpAppOptions, "config" | "oauthMetadata" | "tokenVerifier" | "services">> & {
     config?: HttpConfig;
     oauthMetadata?: OAuthMetadata;
     tokenVerifier?: OAuthTokenVerifier;
     fetchImpl?: typeof fetch;
-    /** Test/deployment seam; production defaults to a non-interactive token preflight. */
-    quickbooksPreflight?: QuickBooksPreflight;
+    services?: RuntimeServices;
   } = {},
 ): Promise<HttpServerHandle> {
   process.env.QUICKBOOKS_NON_INTERACTIVE = "true";
@@ -502,45 +522,41 @@ export async function startHttpServer(
     fetchImpl: options.fetchImpl,
   });
 
-  // Prove the persisted QuickBooks refresh token can authenticate before the
-  // listener is reachable. The client itself retains refresh coalescing and
-  // rotation persistence; QUICKBOOKS_NON_INTERACTIVE prevents any fallback to
-  // a browser/callback flow on both this startup path and later tool calls.
-  const quickbooksPreflight = options.quickbooksPreflight ?? (async () => {
-    try {
-      const { quickbooksClient } = await import("./clients/quickbooks-client.js");
-      await quickbooksClient.authenticate();
-    } catch {
-      throw new Error(
-        "HTTP QuickBooks preflight failed; provision a usable non-interactive refresh token before startup",
-      );
-    }
-  });
-  await quickbooksPreflight();
+  // Cold start validates durable state but does not rotate a QuickBooks token.
+  // The first tool call refreshes under a distributed database lock if needed.
+  const ownedRuntime = options.services ? undefined : await createProductionRuntime(config);
+  const services = options.services ?? ownedRuntime!.services;
 
-  let serverFactory = options.serverFactory;
-  let toolAuthority = options.toolAuthority;
-  if (!serverFactory) {
-    // Import the QuickBooks registry only after configuration, OAuth metadata,
-    // and the non-interactive token preflight have succeeded. This keeps a
-    // missing HTTP configuration from executing QuickBooks module initializers.
-    const registry = await import("./registry.js");
-    if (!toolAuthority) {
-      const authorityByName = new Map(
-        registry.TOOL_DEFINITIONS.map((definition) => [definition.name, definition.authority]),
-      );
-      toolAuthority = (name: string) => authorityByName.get(name);
+  let appState: HttpApp;
+  try {
+    let serverFactory = options.serverFactory;
+    let toolAuthority = options.toolAuthority;
+    if (!serverFactory) {
+      // Import the QuickBooks registry only after configuration, OAuth metadata,
+      // and durable-state validation have succeeded.
+      const registry = await import("./registry.js");
+      if (!toolAuthority) {
+        const authorityByName = new Map(
+          registry.TOOL_DEFINITIONS.map((definition) => [definition.name, definition.authority]),
+        );
+        toolAuthority = (name: string) => authorityByName.get(name);
+      }
+      const { createQuickbooksMcpServer } = await import("./server/qbo-mcp-server.js");
+      serverFactory = () => createQuickbooksMcpServer(services);
     }
-    serverFactory = (await import("./server/qbo-mcp-server.js")).createQuickbooksMcpServer;
+    appState = createHttpApp({
+      ...options,
+      config,
+      oauthMetadata,
+      tokenVerifier,
+      services,
+      serverFactory: serverFactory!,
+      toolAuthority,
+    });
+  } catch (error) {
+    await ownedRuntime?.close().catch(() => undefined);
+    throw error;
   }
-  const appState = createHttpApp({
-    ...options,
-    config,
-    oauthMetadata,
-    tokenVerifier,
-    serverFactory: serverFactory!,
-    toolAuthority,
-  });
   const server = http.createServer(appState.app);
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS;
   let closed = false;
@@ -566,15 +582,22 @@ export async function startHttpServer(
       server.close(finish);
       server.closeIdleConnections();
     });
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(resolve, remainingShutdownMs());
-      appState.closeHandler().then(
-        () => { clearTimeout(timeout); resolve(); },
-        (error) => { clearTimeout(timeout); reject(error); },
-      );
-    });
-    process.removeListener("SIGINT", shutdown);
-    process.removeListener("SIGTERM", shutdown);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(resolve, remainingShutdownMs());
+        appState.closeHandler().then(
+          () => { clearTimeout(timeout); resolve(); },
+          (error) => { clearTimeout(timeout); reject(error); },
+        );
+      });
+    } finally {
+      try {
+        await ownedRuntime?.close();
+      } finally {
+        process.removeListener("SIGINT", shutdown);
+        process.removeListener("SIGTERM", shutdown);
+      }
+    }
   };
   const shutdown = () => {
     void close().catch((error: unknown) => {
@@ -601,9 +624,16 @@ export async function startHttpServer(
       server.listen(config.listenPort, config.listenHost);
     });
   } catch (error) {
-    await appState.closeHandler();
-    process.removeListener("SIGINT", shutdown);
-    process.removeListener("SIGTERM", shutdown);
+    try {
+      await appState.closeHandler();
+    } finally {
+      try {
+        await ownedRuntime?.close();
+      } finally {
+        process.removeListener("SIGINT", shutdown);
+        process.removeListener("SIGTERM", shutdown);
+      }
+    }
     throw error;
   }
 

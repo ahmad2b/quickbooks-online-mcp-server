@@ -1,9 +1,12 @@
+import crypto from "node:crypto";
+import { acceptedContent, inputRequired, type ServerContext } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import {
   RegisteredToolDefinition,
   ToolAuthority,
   ToolDefinition,
 } from "../types/tool-definition.js";
+import type { RuntimeServices } from "../runtime/contracts.js";
 
 /**
  * Defines CRUD categories for the existing environment-based disable policy.
@@ -41,10 +44,13 @@ export const PREFIX_CATEGORY_MAP: Record<string, CrudCategory> = {
 };
 
 const READ_PREFIXES = ["get_", "get-", "read_", "read-", "search_", "search-"];
+const MUTATION_CONFIRMATION_SCHEMA = z.object({
+  confirm: z.boolean().describe("Set true to execute this financial mutation."),
+});
 
 /**
  * Determines the configuration CRUD category of a tool based on its name prefix.
- * Unknown prefixes continue to default to READ for the local stdio disable
+ * Unknown prefixes continue to default to READ for the configuration disable
  * behavior. Network registration uses getToolAuthority(), which is strict.
  */
 export function getCrudCategory(toolName: string): CrudCategory {
@@ -118,6 +124,7 @@ type AuthContext = {
   http?: {
     authInfo?: {
       scopes?: readonly string[];
+      extra?: Record<string, unknown>;
     };
   };
 };
@@ -130,25 +137,88 @@ type AuthContext = {
 export function authorizeToolContext(
   definition: RegisteredToolDefinition,
   context: unknown,
+  services?: RuntimeServices,
 ): { allowed: true } | { allowed: false; result: Record<string, unknown> } {
-  const scopes = (context as AuthContext | undefined)?.http?.authInfo?.scopes;
-  if (!scopes) return { allowed: true };
+  const authInfo = (context as AuthContext | undefined)?.http?.authInfo;
+  const scopes = authInfo?.scopes;
+  if (!scopes || !services) {
+    return {
+      allowed: false,
+      result: safeToolError("This operation requires an authenticated HTTP context."),
+    };
+  }
 
   const required = ["quickbooks.read", definition.scope];
   const uniqueRequired = [...new Set(required)];
   const missing = uniqueRequired.filter((scope) => !scopes.includes(scope));
-  if (missing.length === 0) return { allowed: true };
+  if (missing.length > 0) {
+    return {
+      allowed: false,
+      result: safeToolError("The caller is not authorized for this operation."),
+    };
+  }
 
-  return {
-    allowed: false,
-    result: {
-      isError: true,
-      content: [{
-        type: "text",
-        text: `Insufficient scope. This operation requires: ${uniqueRequired.join(", ")}.`,
-      }],
-    },
-  };
+  const claims = authInfo.extra?.claims;
+  const decision = services.authorizationPolicy.authorize(
+    claims && typeof claims === "object" && !Array.isArray(claims)
+      ? claims as Record<string, unknown>
+      : {},
+  );
+  if (!decision.allowed) {
+    return { allowed: false, result: safeToolError("The caller is not authorized for this QuickBooks company.") };
+  }
+  return { allowed: true };
+}
+
+function safeToolError(message = "The operation could not be completed."): Record<string, unknown> {
+  return { isError: true, content: [{ type: "text", text: message }] };
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function hashInput(input: unknown): string {
+  return crypto.createHash("sha256").update(canonicalJson(input)).digest("hex");
+}
+
+function claimsFromContext(context: ServerContext): Record<string, unknown> {
+  const claims = context.http?.authInfo?.extra?.claims;
+  return claims && typeof claims === "object" && !Array.isArray(claims)
+    ? claims as Record<string, unknown>
+    : {};
+}
+
+function principalId(context: ServerContext): string {
+  const claims = claimsFromContext(context);
+  return crypto.createHash("sha256")
+    .update(`${String(claims.iss ?? "")}\0${String(claims.sub ?? "")}\0${String(claims.client_id ?? claims.azp ?? "")}`)
+    .digest("hex");
+}
+
+function resultIsError(result: unknown): boolean {
+  if (!result || typeof result !== "object") return false;
+  const record = result as { isError?: unknown; content?: unknown };
+  if (record.isError === true) return true;
+  if (!Array.isArray(record.content)) return false;
+  return record.content.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    const text = (item as { text?: unknown }).text;
+    return typeof text === "string" && /^error(?:\b|:)/i.test(text.trim());
+  });
+}
+
+function normalizeToolResult(result: unknown): unknown {
+  if (!result || typeof result !== "object") return result;
+  if (!resultIsError(result)) return result;
+  return { ...(result as Record<string, unknown>), isError: true };
 }
 
 /**
@@ -159,6 +229,7 @@ export function authorizeToolContext(
 export function RegisterTool<T extends z.ZodType>(
   server: unknown,
   toolDefinition: ToolDefinition<T>,
+  services?: RuntimeServices,
 ): boolean {
   const registrationServer = server as ModernServer;
   const definition = materializeToolDefinition(toolDefinition);
@@ -183,9 +254,95 @@ export function RegisterTool<T extends z.ZodType>(
       },
     },
     async (input, context) => {
-      const authorization = authorizeToolContext(definition, context);
+      const authorization = authorizeToolContext(definition, context, services);
       if (!authorization.allowed) return authorization.result;
-      return definition.handler({ params: input as z.infer<T> }, context) as any;
+      const serverContext = context as ServerContext;
+      if (definition.authority === "read") {
+        try {
+          return normalizeToolResult(
+            await definition.handler({ params: input as z.infer<T> }, context),
+          ) as any;
+        } catch {
+          return safeToolError() as any;
+        }
+      }
+
+      const inputHash = hashInput(input);
+      const priorState = serverContext.mcpReq.requestState<{
+        operationId: string;
+        toolName: string;
+        inputHash: string;
+      }>();
+      if (!priorState) {
+        const operationId = crypto.randomUUID();
+        const prepared = await services!.operations.prepare({
+          id: operationId,
+          connectionId: services!.connectionId,
+          principalId: principalId(serverContext),
+          toolName: definition.name,
+          authority: definition.authority,
+          inputHash,
+          status: "prepared",
+        });
+        if (!prepared.created) {
+          return safeToolError(
+            `A matching operation is still ${prepared.status}. Reconcile operation ${prepared.operationId} before retrying.`,
+          ) as any;
+        }
+        const requestState = await services!.requestStateCodec.mint({
+          operationId,
+          toolName: definition.name,
+          inputHash,
+        }, serverContext);
+        return inputRequired({
+          inputRequests: {
+            confirm: inputRequired.elicit({
+              message: `Confirm ${definition.name} against the configured QuickBooks company.`,
+              requestedSchema: MUTATION_CONFIRMATION_SCHEMA,
+            }),
+          },
+          requestState,
+        });
+      }
+
+      if (priorState.toolName !== definition.name || priorState.inputHash !== inputHash) {
+        return safeToolError("The confirmation does not match this operation.") as any;
+      }
+      const confirmation = acceptedContent(
+        serverContext.mcpReq.inputResponses,
+        "confirm",
+        MUTATION_CONFIRMATION_SCHEMA,
+      );
+      if (confirmation?.confirm !== true) {
+        await services!.operations.transition(priorState.operationId, ["prepared"], "failed");
+        return safeToolError("The operation was not confirmed.") as any;
+      }
+      const claimed = await services!.operations.transition(
+        priorState.operationId,
+        ["prepared"],
+        "executing",
+      );
+      if (!claimed) return safeToolError("This operation has already been processed.") as any;
+
+      try {
+        const result = normalizeToolResult(
+          await definition.handler({ params: input as z.infer<T> }, context),
+        );
+        await services!.operations.transition(
+          priorState.operationId,
+          ["executing"],
+          resultIsError(result) ? "failed" : "succeeded",
+        );
+        return result as any;
+      } catch {
+        // Once handler dispatch begins, a transport timeout or thrown callback
+        // cannot prove whether QuickBooks committed the mutation. Record the
+        // ambiguity and prohibit blind automatic replay.
+        await services!.operations.transition(priorState.operationId, ["executing"], "unknown");
+        return safeToolError(
+          `The operation outcome is unknown. Reconcile operation ${priorState.operationId} before retrying.`,
+        ) as any;
+      }
     },
   );
 

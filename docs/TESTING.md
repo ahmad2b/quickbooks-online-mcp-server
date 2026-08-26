@@ -22,12 +22,23 @@ This document explains the testing strategy, patterns, and practices used in the
 
 | Metric | Value |
 |--------|-------|
-| Test Suites | 12 |
-| Total Tests | 335 |
-| Statement Coverage | 100% |
-| Branch Coverage | 100% |
-| Function Coverage | 100% |
-| Line Coverage | 100% |
+| Test Suites | 30 |
+| Total Tests | 531 |
+| Coverage gate | Passing configured global and path-specific thresholds |
+| Handler/helper coverage | 100% for the existing covered surface |
+| Durable QuickBooks client | Lower path-specific floor documented in `jest.config.js` |
+
+After the configured authorization server has a dedicated test resource/client and the HTTPS service is
+running, execute the official frozen MCP requirement set as a deployment gate:
+
+```bash
+npx @modelcontextprotocol/conformance server \
+  --url https://localhost:8443/mcp \
+  --requirements 2026-07-28
+```
+
+That official run is intentionally not represented as a local pass: it needs
+a reachable protected resource and working OAuth test configuration.
 
 ### Test Framework Stack
 
@@ -63,7 +74,8 @@ export default {
     '!src/types/**/*.ts',  // Exclude type definitions
   ],
 
-  // Enforce 100% coverage
+  // Enforce the global gate; interactive OAuth and two documented unreachable
+  // payload branches use explicit path-specific floors below.
   coverageThreshold: {
     global: {
       branches: 100,

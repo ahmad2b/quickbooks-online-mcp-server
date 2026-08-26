@@ -8,18 +8,10 @@ import { formatError } from "../helpers/format-error.js";
  * headroom for unusually long multi-page invoices while preventing a
  * pathologically large response from ballooning process memory.
  *
- * Override via QBO_PDF_MAX_BYTES env var when an unusually large PDF is
- * legitimately expected.
+ * Larger documents require a private artifact-store adapter rather than a
+ * larger inline HTTP response.
  */
-const DEFAULT_MAX_BYTES = 50 * 1024 * 1024; // 50 MiB
-
-function maxBytes(): number {
-  const raw = process.env.QBO_PDF_MAX_BYTES;
-  if (!raw) return DEFAULT_MAX_BYTES;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_BYTES;
-  return parsed;
-}
+const DEFAULT_MAX_BYTES = 2 * 1024 * 1024; // 2 MiB remote-safe inline cap
 
 /**
  * Download a QuickBooks Online invoice as a PDF and return the raw bytes.
@@ -49,12 +41,12 @@ export async function getQuickbooksInvoicePdf(
           return;
         }
 
-        const cap = maxBytes();
+        const cap = DEFAULT_MAX_BYTES;
         if (pdf && pdf.length > cap) {
           resolve({
             result: null,
             isError: true,
-            error: `PDF size ${pdf.length} bytes exceeds cap of ${cap} bytes (override with QBO_PDF_MAX_BYTES).`,
+            error: `PDF size ${pdf.length} bytes exceeds the remote inline cap of ${cap} bytes.`,
           });
           return;
         }
