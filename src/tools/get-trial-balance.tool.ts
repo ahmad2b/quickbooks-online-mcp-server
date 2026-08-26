@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksTrialBalance } from "../handlers/get-quickbooks-trial-balance.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -10,10 +11,11 @@ const toolSchema = z.object({
   accounting_method: z.enum(["Cash", "Accrual"]).optional().describe("Accounting method"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await getQuickbooksTrialBalance(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksTrialBalance(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `Trial Balance Report:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const GetTrialBalanceTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const GetTrialBalanceTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "read",  handler: toolHandler };

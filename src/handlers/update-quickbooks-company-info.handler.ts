@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -19,9 +20,9 @@ export interface UpdateCompanyInfoInput {
   web_addr?: string;
 }
 
-export async function updateQuickbooksCompanyInfo(data: UpdateCompanyInfoInput): Promise<ToolResponse<any>> {
+export async function updateQuickbooksCompanyInfo(data: UpdateCompanyInfoInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
     const payload: any = { Id: data.id, SyncToken: data.sync_token, sparse: true };
     if (data.company_name) payload.CompanyName = data.company_name;
     if (data.legal_name) payload.LegalName = data.legal_name;

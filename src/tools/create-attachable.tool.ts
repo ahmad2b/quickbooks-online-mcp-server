@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { createQuickbooksAttachable } from "../handlers/create-quickbooks-attachable.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -36,8 +37,8 @@ const toolSchema = z.object({
     .describe("Optional reference to a QBO entity this file is attached to."),
 }).strict();
 
-const toolHandler = async ({ params }: any) => {
-  const response = await createQuickbooksAttachable(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await createQuickbooksAttachable(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return {
     content: [
@@ -51,5 +52,6 @@ export const CreateAttachableTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "write",
   handler: toolHandler,
 };

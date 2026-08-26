@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -7,9 +8,9 @@ export interface UpdateInvoiceInput {
   patch: Record<string, any>; // Sparse update fields per Quickbooks spec
 }
 
-export async function updateQuickbooksInvoice({ invoice_id, patch }: UpdateInvoiceInput): Promise<ToolResponse<any>> {
+export async function updateQuickbooksInvoice({ invoice_id, patch }: UpdateInvoiceInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     // Need SyncToken; fetch existing invoice first
     const existing: any = await new Promise((res, rej) => {

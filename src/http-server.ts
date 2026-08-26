@@ -21,6 +21,8 @@ import {
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import {
   scopeForAuthority,
+  hasForbiddenExecutionField,
+  FORBIDDEN_EXECUTION_INPUT_MESSAGE,
 } from "./helpers/register-tool.js";
 import {
   loadHttpConfig,
@@ -33,7 +35,7 @@ import { OAuthAccessTokenVerifier } from "./auth/oauth-access-token-verifier.js"
 import type { ToolAuthority } from "./types/tool-definition.js";
 import { APPLICATION_VERSION } from "./version.js";
 import type { RuntimeServices } from "./runtime/contracts.js";
-import { createProductionRuntime } from "./runtime/production-runtime.js";
+import { createProductionRuntime, type RuntimeProviderAdapters } from "./runtime/production-runtime.js";
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 const WINDOW_MS = 60_000;
@@ -43,6 +45,7 @@ type RequestBody = {
   method?: unknown;
   params?: {
     name?: unknown;
+    arguments?: unknown;
   };
 };
 
@@ -184,6 +187,25 @@ function sendJsonRpcError(
   });
 }
 
+function sendInBandToolError(
+  req: Request,
+  res: Response,
+  code: string,
+  message: string,
+): void {
+  const id = bodyOf(req).id;
+  sendJson(res, 200, {
+    jsonrpc: "2.0",
+    id: typeof id === "string" || typeof id === "number" ? id : null,
+    result: {
+      isError: true,
+      resultType: "complete",
+      content: [{ type: "text", text: message }],
+      _meta: { errorCode: code },
+    },
+  });
+}
+
 async function sendFetchResponse(res: Response, response: globalThis.Response): Promise<void> {
   response.headers.forEach((value, key) => res.setHeader(key, value));
   const body = await response.text();
@@ -248,10 +270,21 @@ function makeRateLimitMiddleware(
       const claimRecord = claims && typeof claims === "object" && !Array.isArray(claims)
         ? claims as Record<string, unknown>
         : {};
-      const identityKey = [claimRecord.iss, claimRecord.sub, claimRecord.client_id ?? claimRecord.azp]
+      const identity = services.authorizationPolicy.authorize(claimRecord);
+      if (!identity.allowed) {
+        sendJsonRpcError(req, res, 403, -32001, "The caller is not authorized for this resource");
+        return;
+      }
+      const identityKey = [
+        identity.identity.issuer,
+        identity.identity.subject,
+        identity.identity.clientId,
+        identity.identity.organizationId,
+        identity.identity.qboConnectionId,
+      ]
         .map((value) => stableIdentifier(typeof value === "string" ? value : undefined))
         .join(":");
-      const key = `${identityKey}:${stableIdentifier(services.connectionId)}:${authorityClass(req, resolver)}`;
+      const key = `${identityKey}:${authorityClass(req, resolver)}`;
       const decision = await services.rateLimiter.consume(
         key,
         config.rateLimitPerMinute,
@@ -270,8 +303,24 @@ function makeRateLimitMiddleware(
   };
 }
 
-function makeCompanyBindingMiddleware(services: RuntimeServices) {
-  return (req: Request, res: Response, next: NextFunction): void => {
+function makeCompanyBindingMiddleware(config: HttpConfig, services: RuntimeServices) {
+  const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(config.resourceUri);
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const authInfo = req.auth;
+    // OAuthTokenVerifier implementations should enforce audience/resource
+    // binding themselves. Re-check the resulting AuthInfo here so an injected
+    // verifier cannot accidentally authorize a token minted for another API.
+    if (!authInfo?.resource || !(authInfo.resource instanceof URL) ||
+        authInfo.resource.href !== config.resourceUri.href) {
+      await sendFetchResponse(
+        res,
+        bearerAuthChallengeResponse(
+          new OAuthError(OAuthErrorCode.InvalidToken, "The access token is not issued for this resource"),
+          { resourceMetadataUrl },
+        ),
+      );
+      return;
+    }
     const claims = req.auth?.extra?.claims;
     const decision = services.authorizationPolicy.authorize(
       claims && typeof claims === "object" && !Array.isArray(claims)
@@ -280,6 +329,26 @@ function makeCompanyBindingMiddleware(services: RuntimeServices) {
     );
     if (!decision.allowed) {
       sendJsonRpcError(req, res, 403, -32001, "The caller is not authorized for this resource");
+      return;
+    }
+    next();
+  };
+}
+
+/**
+ * Reject execution-routing fields before the MCP SDK validates tool input.
+ * Zod object schemas intentionally strip unknown keys, so a callback-level
+ * check cannot see a forged tenant, connection, realm, or credential field.
+ */
+export function makeExecutionInputMiddleware() {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (bodyMethod(req) === "tools/call" && hasForbiddenExecutionField(bodyOf(req).params?.arguments)) {
+      sendInBandToolError(
+        req,
+        res,
+        "MCP_TOOL_NOT_AUTHORIZED",
+        FORBIDDEN_EXECUTION_INPUT_MESSAGE,
+      );
       return;
     }
     next();
@@ -415,7 +484,8 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.config.resourceUri),
   });
   const scope = makeScopeMiddleware(options.config, toolAuthority);
-  const companyBinding = makeCompanyBindingMiddleware(options.services);
+  const companyBinding = makeCompanyBindingMiddleware(options.config, options.services);
+  const executionInput = makeExecutionInputMiddleware();
   const rateLimit = makeRateLimitMiddleware(options.config, now, toolAuthority, options.services);
   const nodeHandler = toNodeHandler(handler, {
     onerror: (error) => {
@@ -451,7 +521,7 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
       state.inFlight = Math.max(0, state.inFlight - 1);
     });
     next();
-  }, bearer, companyBinding, rateLimit, scope, async (req: Request, res: Response, next: NextFunction) => {
+  }, bearer, companyBinding, executionInput, rateLimit, scope, async (req: Request, res: Response, next: NextFunction) => {
     try {
       await nodeHandler(req, res, req.body);
     } catch (error) {
@@ -494,9 +564,9 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
 }
 
 /**
- * Validate configuration, fetch authorization-server metadata, construct the shared factory,
- * and only then bind the HTTP listener. HTTP mode sets the non-interactive
- * marker before any QuickBooks request can be dispatched.
+ * Validate configuration, fetch authorization-server metadata, verify injected
+ * provider readiness, and only then bind the HTTP listener. HTTP mode sets the
+ * non-interactive marker before any QuickBooks request can be dispatched.
  */
 export async function startHttpServer(
   options: Partial<Omit<HttpAppOptions, "config" | "oauthMetadata" | "tokenVerifier" | "services">> & {
@@ -505,6 +575,7 @@ export async function startHttpServer(
     tokenVerifier?: OAuthTokenVerifier;
     fetchImpl?: typeof fetch;
     services?: RuntimeServices;
+    runtimeAdapters?: RuntimeProviderAdapters;
   } = {},
 ): Promise<HttpServerHandle> {
   process.env.QUICKBOOKS_NON_INTERACTIVE = "true";
@@ -522,9 +593,9 @@ export async function startHttpServer(
     fetchImpl: options.fetchImpl,
   });
 
-  // Cold start validates durable state but does not rotate a QuickBooks token.
-  // The first tool call refreshes under a distributed database lock if needed.
-  const ownedRuntime = options.services ? undefined : await createProductionRuntime(config);
+  // Runtime composition performs provider readiness checks without acquiring a
+  // customer lease. No QuickBooks credential is loaded during cold start.
+  const ownedRuntime = options.services ? undefined : await createProductionRuntime(config, options.runtimeAdapters);
   const services = options.services ?? ownedRuntime!.services;
 
   let appState: HttpApp;

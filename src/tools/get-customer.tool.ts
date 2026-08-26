@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksCustomer } from "../handlers/get-quickbooks-customer.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -8,9 +9,9 @@ const toolSchema = z.object({ id: z.string() });
 
 type ToolParams = z.infer<typeof toolSchema>;
 
-const toolHandler = async (args: { [key: string]: ToolParams }) => {
+const toolHandler = async (args: { [key: string]: ToolParams }, _context?: unknown, dependencies?: QboHandlerDependencies) => {
   const params = args.params as ToolParams;
-  const response = await getQuickbooksCustomer(params.id);
+  const response = await getQuickbooksCustomer(params.id, dependencies);
 
   if (response.isError) {
     return {
@@ -32,5 +33,6 @@ export const GetCustomerTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
-}; 
+};

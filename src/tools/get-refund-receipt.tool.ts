@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksRefundReceipt } from "../handlers/get-quickbooks-refund-receipt.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -8,8 +9,8 @@ const toolSchema = z.object({
   id: z.string().min(1).describe("The QuickBooks Refund Receipt ID"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await getQuickbooksRefundReceipt(params.id);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksRefundReceipt(params.id, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error getting refund receipt: ${response.error}` }] };
   }
@@ -25,5 +26,6 @@ export const GetRefundReceiptTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
 };

@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { deleteQuickbooksPurchaseOrder } from "../handlers/delete-quickbooks-purchase-order.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -6,8 +7,8 @@ const toolName = "delete_purchase_order";
 const toolDescription = "Delete a purchase order in QuickBooks Online.";
 const toolSchema = z.object({ idOrEntity: z.any() });
 
-const toolHandler = async (args: any) => {
-  const response = await deleteQuickbooksPurchaseOrder(args.params.idOrEntity);
+const toolHandler = async (args: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await deleteQuickbooksPurchaseOrder(args.params.idOrEntity, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error deleting purchase order: ${response.error}` }] };
   }
@@ -23,5 +24,6 @@ export const DeletePurchaseOrderTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "delete",
   handler: toolHandler,
 };

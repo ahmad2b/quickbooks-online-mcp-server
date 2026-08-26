@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -9,9 +10,9 @@ export interface SearchCreditMemosInput {
   limit?: number;
 }
 
-export async function searchQuickbooksCreditMemos(data: SearchCreditMemosInput): Promise<ToolResponse<any>> {
+export async function searchQuickbooksCreditMemos(data: SearchCreditMemosInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     const criteria: Array<Record<string, any>> = [];
 

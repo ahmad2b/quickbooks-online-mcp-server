@@ -10,11 +10,9 @@ export const QUICKBOOKS_SERVER_INFO = {
 } as const;
 
 /**
- * Build a fresh v2 server instance for one serving unit/request.
- *
- * QuickBooks credentials remain process-global by design (Phase 1 is one
- * deployment to one realm), while protocol state is never shared between HTTP
- * requests.
+ * Build a fresh v2 server instance for one serving unit/request. QuickBooks
+ * credentials and clients are created later by the request execution seam;
+ * protocol state is never shared between HTTP requests.
  */
 export function createQuickbooksMcpServer(services: RuntimeServices): McpServer {
   const server = new McpServer(QUICKBOOKS_SERVER_INFO, {

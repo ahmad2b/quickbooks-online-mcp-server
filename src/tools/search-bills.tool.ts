@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { searchQuickbooksBills } from "../handlers/search-quickbooks-bills.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -15,7 +16,7 @@ const billFieldEnum = z.enum([
   "MetaData.CreateTime",
   "MetaData.LastUpdatedTime",
   "TxnDate",
-  "DueDate", 
+  "DueDate",
   "Balance",
   "TotalAmt",
   "VendorRef",
@@ -65,7 +66,8 @@ export const SearchBillsTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
-  handler: async (args) => {
+  authority: "read",
+  handler: async (args, _context?: unknown, dependencies?: QboHandlerDependencies) => {
     const { criteria = [], ...options } = (args.params ?? {}) as z.infer<typeof toolSchema>;
 
     // build criteria to pass to SDK, supporting advanced operator syntax
@@ -84,7 +86,7 @@ export const SearchBillsTool: ToolDefinition<typeof toolSchema> = {
       criteriaToSend = { ...options };
     }
 
-    const response = await searchQuickbooksBills(criteriaToSend);
+    const response = await searchQuickbooksBills(criteriaToSend, dependencies);
     if (response.isError) {
       return {
         content: [{ type: "text" as const, text: `Error searching bills: ${response.error}` }],
@@ -99,4 +101,4 @@ export const SearchBillsTool: ToolDefinition<typeof toolSchema> = {
       ],
     };
   },
-}; 
+};

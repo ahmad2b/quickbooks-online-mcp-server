@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -67,9 +68,9 @@ function normalizeAccountPayload(payload: Record<string, any>): Record<string, a
   return normalized;
 }
 
-export async function createQuickbooksAccount(data: CreateAccountInput): Promise<ToolResponse<any>> {
+export async function createQuickbooksAccount(data: CreateAccountInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     // Build initial payload then normalize.
     const basePayload: any = {

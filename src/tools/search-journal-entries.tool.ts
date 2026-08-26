@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { searchQuickbooksJournalEntries } from "../handlers/search-quickbooks-journal-entries.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -20,8 +21,8 @@ const toolSchema = z.object({
 type ToolParams = z.infer<typeof toolSchema>;
 
 // Define the tool handler
-const toolHandler = async (args: any) => {
-  const response = await searchQuickbooksJournalEntries(args.params);
+const toolHandler = async (args: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await searchQuickbooksJournalEntries(args.params, dependencies);
 
   if (response.isError) {
     return {
@@ -43,5 +44,6 @@ export const SearchJournalEntriesTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
-}; 
+};

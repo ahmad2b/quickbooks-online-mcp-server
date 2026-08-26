@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { createQuickbooksItem } from "../handlers/create-quickbooks-item.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -14,8 +15,8 @@ const toolSchema = z.object({
   description: z.string().optional(),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await createQuickbooksItem(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await createQuickbooksItem(params, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error creating item: ${response.error}` }] };
   }
@@ -31,5 +32,6 @@ export const CreateItemTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "write",
   handler: toolHandler,
-}; 
+};

@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksProfitAndLoss } from "../handlers/get-quickbooks-profit-and-loss.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -16,10 +17,11 @@ const toolSchema = z.object({
   class: z.string().optional().describe("Filter by class ID"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await getQuickbooksProfitAndLoss(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksProfitAndLoss(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `Profit and Loss Report:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const GetProfitAndLossTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const GetProfitAndLossTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "read",  handler: toolHandler };

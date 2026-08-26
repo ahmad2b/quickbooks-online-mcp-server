@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksPaymentMethod } from "../handlers/get-quickbooks-payment-method.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -8,10 +9,11 @@ const toolSchema = z.object({
   id: z.string().min(1).describe("Payment method ID"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await getQuickbooksPaymentMethod(params.id);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksPaymentMethod(params.id, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const GetPaymentMethodTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const GetPaymentMethodTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "read",  handler: toolHandler };

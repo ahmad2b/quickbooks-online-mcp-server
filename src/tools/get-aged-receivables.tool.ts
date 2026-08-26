@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksAgedReceivables } from "../handlers/get-quickbooks-aged-receivables.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -12,10 +13,11 @@ const toolSchema = z.object({
   num_periods: z.number().optional().describe("Number of aging periods (default 4)"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await getQuickbooksAgedReceivables(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksAgedReceivables(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `Aged Receivables Report:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const GetAgedReceivablesTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const GetAgedReceivablesTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "read",  handler: toolHandler };

@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -17,9 +18,9 @@ export interface CreateCreditMemoInput {
   global_tax_calculation?: "TaxExcluded" | "TaxInclusive" | "NotApplicable";
 }
 
-export async function createQuickbooksCreditMemo(data: CreateCreditMemoInput): Promise<ToolResponse<any>> {
+export async function createQuickbooksCreditMemo(data: CreateCreditMemoInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     const creditMemoPayload: any = {
       CustomerRef: { value: data.customer_ref },

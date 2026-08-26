@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { createQuickbooksInvoice } from "../handlers/create-quickbooks-invoice.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -56,8 +57,8 @@ const toolSchema = z.object({
     .describe("Billing email address (QBO BillEmail). Falls back to the customer default if omitted"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await createQuickbooksInvoice(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await createQuickbooksInvoice(params, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error creating invoice: ${response.error}` }] };
   }
@@ -73,5 +74,6 @@ export const CreateInvoiceTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "write",
   handler: toolHandler,
-}; 
+};

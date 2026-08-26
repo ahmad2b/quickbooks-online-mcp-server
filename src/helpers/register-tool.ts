@@ -6,11 +6,14 @@ import {
   ToolAuthority,
   ToolDefinition,
 } from "../types/tool-definition.js";
-import type { RuntimeServices } from "../runtime/contracts.js";
+import type {
+  ExecutionContext,
+  QboHandlerDependencies,
+  RuntimeServices,
+} from "../runtime/contracts.js";
+import { QboExecutionError } from "../clients/quickbooks-client.js";
 
-/**
- * Defines CRUD categories for the existing environment-based disable policy.
- */
+/** Defines CRUD categories for deployment-wide emergency brakes. */
 export const CRUD_CATEGORY = {
   WRITE: "WRITE",
   UPDATE: "UPDATE",
@@ -20,20 +23,12 @@ export const CRUD_CATEGORY = {
 
 export type CrudCategory = typeof CRUD_CATEGORY[keyof typeof CRUD_CATEGORY];
 
-/**
- * Maps each CRUD category to its corresponding environment variable for
- * disabling tools.
- */
 export const DISABLE_ENV = {
   [CRUD_CATEGORY.WRITE]: "QUICKBOOKS_DISABLE_WRITE",
   [CRUD_CATEGORY.UPDATE]: "QUICKBOOKS_DISABLE_UPDATE",
   [CRUD_CATEGORY.DELETE]: "QUICKBOOKS_DISABLE_DELETE",
 } as const;
 
-/**
- * Maps every non-READ verb prefix to its category. Existing tool identifiers
- * use both underscore and hyphen separators.
- */
 export const PREFIX_CATEGORY_MAP: Record<string, CrudCategory> = {
   "create_": CRUD_CATEGORY.WRITE,
   "create-": CRUD_CATEGORY.WRITE,
@@ -48,11 +43,31 @@ const MUTATION_CONFIRMATION_SCHEMA = z.object({
   confirm: z.boolean().describe("Set true to execute this financial mutation."),
 });
 
-/**
- * Determines the configuration CRUD category of a tool based on its name prefix.
- * Unknown prefixes continue to default to READ for the configuration disable
- * behavior. Network registration uses getToolAuthority(), which is strict.
- */
+const FORBIDDEN_EXECUTION_KEYS = new Set([
+  "tenant",
+  "tenantid",
+  "organization",
+  "organizationid",
+  "orgid",
+  "connection",
+  "connectionid",
+  "qboconnection",
+  "qboconnectionid",
+  "realm",
+  "realmid",
+  "environment",
+  "accesstoken",
+  "refreshtoken",
+  "clientsecret",
+  "filepath",
+  "outputpath",
+  "fileurl",
+  "overwrite",
+]);
+
+export const FORBIDDEN_EXECUTION_INPUT_MESSAGE =
+  "Organization, connection, realm, environment, credential, and server-file fields are not accepted as tool input.";
+
 export function getCrudCategory(toolName: string): CrudCategory {
   for (const [prefix, category] of Object.entries(PREFIX_CATEGORY_MAP)) {
     if (toolName.startsWith(prefix)) return category;
@@ -60,10 +75,6 @@ export function getCrudCategory(toolName: string): CrudCategory {
   return CRUD_CATEGORY.READ;
 }
 
-/**
- * Converts an explicitly recognized tool-name prefix into the authority class
- * used by OAuth scope checks. Unknown or missing prefixes fail closed.
- */
 export function getToolAuthority(toolName: string): ToolAuthority | undefined {
   const category = getCrudCategory(toolName);
   if (category === CRUD_CATEGORY.WRITE || category === CRUD_CATEGORY.UPDATE) return "write";
@@ -76,13 +87,20 @@ export function scopeForAuthority(authority: ToolAuthority): `quickbooks.${ToolA
   return `quickbooks.${authority}`;
 }
 
+/**
+ * Materialize one definition and verify explicit authority metadata. Prefixes
+ * remain a migration assertion for the incident kill-switch classification,
+ * never a substitute for the security metadata required by the registry.
+ */
 export function materializeToolDefinition<T extends z.ZodType>(
   toolDefinition: ToolDefinition<T>,
 ): RegisteredToolDefinition<T> {
   const derived = getToolAuthority(toolDefinition.name);
-  const authority = toolDefinition.authority ?? derived;
-
-  if (!authority || !derived) {
+  const authority = toolDefinition.authority;
+  if (!authority) {
+    throw new Error(`Tool ${toolDefinition.name} is missing explicit authority metadata`);
+  }
+  if (!derived) {
     throw new Error(`Tool ${toolDefinition.name} has no recognized authority class`);
   }
   if (authority !== derived) {
@@ -90,7 +108,6 @@ export function materializeToolDefinition<T extends z.ZodType>(
       `Tool ${toolDefinition.name} authority mismatch: registered ${authority}, expected ${derived}`,
     );
   }
-
   return {
     ...toolDefinition,
     authority,
@@ -98,7 +115,6 @@ export function materializeToolDefinition<T extends z.ZodType>(
   };
 }
 
-/** Checks if a tool is disabled based on its configuration CRUD category. */
 export function isToolDisabled(toolName: string): boolean {
   const category = getCrudCategory(toolName);
   if (category === CRUD_CATEGORY.READ) return false;
@@ -127,79 +143,116 @@ type AuthContext = {
       extra?: Record<string, unknown>;
     };
   };
+  mcpReq?: {
+    id?: string | number;
+    method?: string;
+  };
 };
 
-/**
- * Returns a tool result for a scope denial. HTTP callers are denied by the
- * boundary middleware before dispatch; this second check prevents a future
- * adapter from accidentally bypassing the same policy.
- */
+function claimsFromContext(context: ServerContext): Readonly<Record<string, unknown>> {
+  const claims = context.http?.authInfo?.extra?.claims;
+  return claims && typeof claims === "object" && !Array.isArray(claims)
+    ? claims as Readonly<Record<string, unknown>>
+    : {};
+}
+
+/** Build the immutable context once from verified AuthInfo claims. */
+export function executionContextFromServerContext(
+  context: ServerContext,
+  services: RuntimeServices,
+): ExecutionContext | undefined {
+  const authInfo = context.http?.authInfo;
+  const decision = services.authorizationPolicy.authorize(claimsFromContext(context));
+  if (!decision.allowed) return undefined;
+  const identity = decision.identity;
+  // The verifier is responsible for cryptographic validation, but the
+  // execution seam still refuses an inconsistent AuthInfo object. This keeps
+  // custom test/deployment verifiers from substituting a different principal
+  // for the client identity represented by the signed claims.
+  if (!authInfo || authInfo.clientId !== identity.clientId) return undefined;
+  const scopes = new Set(
+    (context.http?.authInfo?.scopes ?? []).filter(
+      (scope): scope is "quickbooks.read" | "quickbooks.write" | "quickbooks.delete" =>
+        scope === "quickbooks.read" || scope === "quickbooks.write" || scope === "quickbooks.delete",
+    ),
+  );
+  const requestId = context.mcpReq?.id === undefined
+    ? crypto.randomUUID()
+    : String(context.mcpReq.id);
+  return Object.freeze({
+    requestId,
+    issuer: identity.issuer,
+    subjectId: identity.subject,
+    oauthClientId: identity.clientId,
+    organizationId: identity.organizationId,
+    qboConnectionId: identity.qboConnectionId,
+    scopes,
+  });
+}
+
 export function authorizeToolContext(
   definition: RegisteredToolDefinition,
   context: unknown,
   services?: RuntimeServices,
-): { allowed: true } | { allowed: false; result: Record<string, unknown> } {
+): { allowed: true; execution: ExecutionContext } | { allowed: false; result: Record<string, unknown> } {
   const authInfo = (context as AuthContext | undefined)?.http?.authInfo;
   const scopes = authInfo?.scopes;
   if (!scopes || !services) {
     return {
       allowed: false,
-      result: safeToolError("This operation requires an authenticated HTTP context."),
+      result: safeToolError("MCP_TOOL_NOT_AUTHORIZED", "This operation requires an authenticated HTTP context."),
     };
   }
 
   const required = ["quickbooks.read", definition.scope];
-  const uniqueRequired = [...new Set(required)];
-  const missing = uniqueRequired.filter((scope) => !scopes.includes(scope));
+  const missing = [...new Set(required)].filter((scope) => !scopes.includes(scope));
   if (missing.length > 0) {
     return {
       allowed: false,
-      result: safeToolError("The caller is not authorized for this operation."),
+      result: safeToolError("MCP_TOOL_NOT_AUTHORIZED", "The caller is not authorized for this operation."),
     };
   }
 
-  const claims = authInfo.extra?.claims;
-  const decision = services.authorizationPolicy.authorize(
-    claims && typeof claims === "object" && !Array.isArray(claims)
-      ? claims as Record<string, unknown>
-      : {},
-  );
-  if (!decision.allowed) {
-    return { allowed: false, result: safeToolError("The caller is not authorized for this QuickBooks company.") };
+  const execution = executionContextFromServerContext(context as ServerContext, services);
+  if (!execution) {
+    return {
+      allowed: false,
+      result: safeToolError("MCP_TOOL_NOT_AUTHORIZED", "The caller is not authorized for this QuickBooks connection."),
+    };
   }
-  return { allowed: true };
+  return { allowed: true, execution };
 }
 
-function safeToolError(message = "The operation could not be completed."): Record<string, unknown> {
-  return { isError: true, content: [{ type: "text", text: message }] };
+function safeToolError(code: string, message = "The operation could not be completed."): Record<string, unknown> {
+  return {
+    isError: true,
+    content: [{ type: "text", text: message }],
+    _meta: { errorCode: code },
+  };
 }
 
 function canonicalJson(value: unknown): string {
+  if (value === undefined) return "null";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
-      .join(",")}}`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+    .join(",")}}`;
+}
+
+function fingerprintInput(input: unknown, services: RuntimeServices): string {
+  if (!services.operationFingerprint.key || services.operationFingerprint.key.length === 0) {
+    throw new Error("Operation fingerprint key is not configured");
   }
-  return JSON.stringify(value) ?? "null";
+  return crypto.createHmac("sha256", services.operationFingerprint.key)
+    .update(canonicalJson(input))
+    .digest("hex");
 }
 
-function hashInput(input: unknown): string {
-  return crypto.createHash("sha256").update(canonicalJson(input)).digest("hex");
-}
-
-function claimsFromContext(context: ServerContext): Record<string, unknown> {
-  const claims = context.http?.authInfo?.extra?.claims;
-  return claims && typeof claims === "object" && !Array.isArray(claims)
-    ? claims as Record<string, unknown>
-    : {};
-}
-
-function principalId(context: ServerContext): string {
-  const claims = claimsFromContext(context);
-  return crypto.createHash("sha256")
-    .update(`${String(claims.iss ?? "")}\0${String(claims.sub ?? "")}\0${String(claims.client_id ?? claims.azp ?? "")}`)
+function principalId(execution: ExecutionContext, services: RuntimeServices): string {
+  return crypto.createHmac("sha256", services.operationFingerprint.key)
+    .update(`${execution.issuer}\0${execution.subjectId}\0${execution.oauthClientId}`)
     .digest("hex");
 }
 
@@ -221,10 +274,61 @@ function normalizeToolResult(result: unknown): unknown {
   return { ...(result as Record<string, unknown>), isError: true };
 }
 
+export function hasForbiddenExecutionField(value: unknown, seen = new Set<object>()): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => hasForbiddenExecutionField(item, seen));
+  return Object.entries(value as Record<string, unknown>).some(([key, item]) => {
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return FORBIDDEN_EXECUTION_KEYS.has(normalized) || hasForbiddenExecutionField(item, seen);
+  });
+}
+
+function operationStateMatches(
+  value: unknown,
+  definition: RegisteredToolDefinition,
+  inputFingerprint: string,
+): value is { operationId: string; toolName: string; inputFingerprint: string } {
+  if (!value || typeof value !== "object") return false;
+  const state = value as Record<string, unknown>;
+  return typeof state.operationId === "string" && state.operationId.length > 0 &&
+    state.toolName === definition.name && state.inputFingerprint === inputFingerprint;
+}
+
+async function executeWithLease(
+  definition: RegisteredToolDefinition,
+  input: unknown,
+  context: ServerContext,
+  execution: ExecutionContext,
+  services: RuntimeServices,
+): Promise<unknown> {
+  const lease = await services.qboClientFactory.create(execution);
+  const dependencies: QboHandlerDependencies = Object.freeze({
+    execution,
+    qbo: lease.qbo,
+    rawQbo: lease.rawQbo,
+  });
+  try {
+    return await definition.handler(
+      { params: input as z.infer<typeof definition.schema> },
+      context,
+      dependencies,
+    );
+  } finally {
+    await lease.close().catch(() => undefined);
+  }
+}
+
+function qboErrorResult(error: unknown): Record<string, unknown> {
+  if (error instanceof QboExecutionError) return safeToolError(error.code, error.message);
+  return safeToolError("QBO_EXECUTION_LEASE_UNAVAILABLE", "The QuickBooks execution lease is unavailable.");
+}
+
 /**
- * Registers one definition through the modern SDK adapter. The callback
- * receives direct modern input, then adapts it once for the internal handlers
- * that expect `{ params }`. No legacy MCP API is exposed.
+ * Registers one definition through the modern SDK adapter. Every successful
+ * execution obtains a request-scoped lease only after authorization (and,
+ * for mutations, after confirmation/ledger claim).
  */
 export function RegisterTool<T extends z.ZodType>(
   server: unknown,
@@ -234,7 +338,6 @@ export function RegisterTool<T extends z.ZodType>(
   const registrationServer = server as ModernServer;
   const definition = materializeToolDefinition(toolDefinition);
   if (isToolDisabled(definition.name)) return false;
-
   if (typeof registrationServer.registerTool !== "function") {
     throw new Error(`Server does not support modern tool registration for ${definition.name}`);
   }
@@ -254,50 +357,73 @@ export function RegisterTool<T extends z.ZodType>(
       },
     },
     async (input, context) => {
+      if (hasForbiddenExecutionField(input)) {
+        return safeToolError("MCP_TOOL_NOT_AUTHORIZED", FORBIDDEN_EXECUTION_INPUT_MESSAGE);
+      }
       const authorization = authorizeToolContext(definition, context, services);
       if (!authorization.allowed) return authorization.result;
       const serverContext = context as ServerContext;
+      const execution = authorization.execution;
+
       if (definition.authority === "read") {
         try {
-          return normalizeToolResult(
-            await definition.handler({ params: input as z.infer<T> }, context),
-          ) as any;
-        } catch {
-          return safeToolError() as any;
+          return normalizeToolResult(await executeWithLease(definition, input, serverContext, execution, services!)) as any;
+        } catch (error) {
+          return qboErrorResult(error) as any;
         }
       }
 
-      const inputHash = hashInput(input);
+      let inputFingerprint: string;
+      try {
+        inputFingerprint = fingerprintInput(input, services!);
+      } catch {
+        return safeToolError("MCP_TOOL_NOT_AUTHORIZED", "Mutation safety is not configured.") as any;
+      }
       const priorState = serverContext.mcpReq.requestState<{
         operationId: string;
         toolName: string;
-        inputHash: string;
+        inputFingerprint: string;
       }>();
       if (!priorState) {
         const operationId = crypto.randomUUID();
-        const prepared = await services!.operations.prepare({
-          id: operationId,
-          connectionId: services!.connectionId,
-          principalId: principalId(serverContext),
-          toolName: definition.name,
-          authority: definition.authority,
-          inputHash,
-          status: "prepared",
-        });
+        let prepared;
+        try {
+          prepared = await services!.operationLedger.prepare({
+            id: operationId,
+            requestId: execution.requestId,
+            organizationId: execution.organizationId,
+            connectionId: execution.qboConnectionId,
+            principalId: principalId(execution, services!),
+            toolName: definition.name,
+            authority: definition.authority,
+            inputFingerprint,
+            fingerprintKeyVersion: services!.operationFingerprint.keyVersion,
+            status: "prepared",
+          });
+        } catch {
+          return safeToolError("QBO_OPERATION_LEDGER_UNAVAILABLE", "Mutation safety is temporarily unavailable.") as any;
+        }
         if (!prepared.created) {
           return safeToolError(
+            "QBO_OPERATION_OUTCOME_UNKNOWN",
             `A matching operation is still ${prepared.status}. Reconcile operation ${prepared.operationId} before retrying.`,
           ) as any;
         }
-        const requestState = await services!.requestStateCodec.mint({
-          operationId,
-          toolName: definition.name,
-          inputHash,
-        }, serverContext);
+        let requestState: string;
+        try {
+          requestState = await services!.requestStateCodec.mint({
+            operationId,
+            toolName: definition.name,
+            inputFingerprint,
+          }, serverContext);
+        } catch {
+          await services!.operationLedger.transition(operationId, ["prepared"], "failed").catch(() => undefined);
+          return safeToolError("QBO_OPERATION_LEDGER_UNAVAILABLE", "Mutation confirmation is temporarily unavailable.") as any;
+        }
         return inputRequired({
           inputRequests: {
             confirm: inputRequired.elicit({
-              message: `Confirm ${definition.name} against the configured QuickBooks company.`,
+              message: `Confirm ${definition.name} against the authorized QuickBooks connection.`,
               requestedSchema: MUTATION_CONFIRMATION_SCHEMA,
             }),
           },
@@ -305,8 +431,8 @@ export function RegisterTool<T extends z.ZodType>(
         });
       }
 
-      if (priorState.toolName !== definition.name || priorState.inputHash !== inputHash) {
-        return safeToolError("The confirmation does not match this operation.") as any;
+      if (!operationStateMatches(priorState, definition, inputFingerprint)) {
+        return safeToolError("MCP_TOOL_NOT_AUTHORIZED", "The confirmation does not match this operation.") as any;
       }
       const confirmation = acceptedContent(
         serverContext.mcpReq.inputResponses,
@@ -314,37 +440,42 @@ export function RegisterTool<T extends z.ZodType>(
         MUTATION_CONFIRMATION_SCHEMA,
       );
       if (confirmation?.confirm !== true) {
-        await services!.operations.transition(priorState.operationId, ["prepared"], "failed");
-        return safeToolError("The operation was not confirmed.") as any;
+        await services!.operationLedger.transition(priorState.operationId, ["prepared"], "failed").catch(() => undefined);
+        return safeToolError("MCP_MUTATION_NOT_CONFIRMED", "The operation was not confirmed.") as any;
       }
-      const claimed = await services!.operations.transition(
-        priorState.operationId,
-        ["prepared"],
-        "executing",
-      );
-      if (!claimed) return safeToolError("This operation has already been processed.") as any;
+      let claimed: boolean;
+      try {
+        claimed = await services!.operationLedger.transition(
+          priorState.operationId,
+          ["prepared"],
+          "executing",
+        );
+      } catch {
+        return safeToolError("QBO_OPERATION_LEDGER_UNAVAILABLE", "Mutation safety is temporarily unavailable.") as any;
+      }
+      if (!claimed) return safeToolError("QBO_OPERATION_OUTCOME_UNKNOWN", "This operation has already been processed.") as any;
 
       try {
         const result = normalizeToolResult(
-          await definition.handler({ params: input as z.infer<T> }, context),
+          await executeWithLease(definition, input, serverContext, execution, services!),
         );
-        await services!.operations.transition(
+        await services!.operationLedger.transition(
           priorState.operationId,
           ["executing"],
           resultIsError(result) ? "failed" : "succeeded",
-        );
+        ).catch(() => undefined);
         return result as any;
-      } catch {
-        // Once handler dispatch begins, a transport timeout or thrown callback
-        // cannot prove whether QuickBooks committed the mutation. Record the
-        // ambiguity and prohibit blind automatic replay.
-        await services!.operations.transition(priorState.operationId, ["executing"], "unknown");
+      } catch (error) {
+        // Dispatch started; without a proven response the upstream commit is
+        // ambiguous and must be reconciled before any retry.
+        await services!.operationLedger.transition(priorState.operationId, ["executing"], "unknown").catch(() => undefined);
+        if (error instanceof QboExecutionError) return qboErrorResult(error) as any;
         return safeToolError(
+          "QBO_OPERATION_OUTCOME_UNKNOWN",
           `The operation outcome is unknown. Reconcile operation ${priorState.operationId} before retrying.`,
         ) as any;
       }
     },
   );
-
   return true;
 }

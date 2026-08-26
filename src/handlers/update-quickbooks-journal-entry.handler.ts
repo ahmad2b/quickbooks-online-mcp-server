@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -6,9 +7,9 @@ import { formatError } from "../helpers/format-error.js";
  * Update a journal entry in QuickBooks Online
  * @param journalEntryData The journal entry object to update
  */
-export async function updateQuickbooksJournalEntry(journalEntryData: any): Promise<ToolResponse<any>> {
+export async function updateQuickbooksJournalEntry(journalEntryData: any, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     return new Promise((resolve) => {
       quickbooks.updateJournalEntry(journalEntryData, (err: any, journalEntry: any) => {

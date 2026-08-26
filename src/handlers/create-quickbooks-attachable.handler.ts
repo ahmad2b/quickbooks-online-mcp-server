@@ -1,5 +1,6 @@
 import https from "https";
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 import { inferContentType } from "../helpers/infer-content-type.js";
@@ -73,8 +74,8 @@ function sanitizeFilename(name: string): string {
 // Map a status code to a user-safe error message. The raw QBO response body
 // can include realm IDs, internal trace identifiers, and other detail that
 // should not be returned to an MCP client — the LLM has no business seeing
-// internal QBO error envelopes. Raw bodies are still logged server-side for
-// operator debugging.
+// internal QBO error envelopes. The body is deliberately neither logged nor
+// persisted; provider correlation belongs in deployment telemetry.
 function redactedUploadError(statusCode: number | undefined): string {
   if (!statusCode) return "QBO upload failed: network error";
   if (statusCode === 401 || statusCode === 403) return `QBO upload failed (${statusCode}): authentication or authorization error`;
@@ -157,8 +158,8 @@ async function uploadAttachableFile(
         });
       }
     );
-    req.on("error", (err) => {
-      console.error(`[qbo-attachable-upload] network error: ${err.message}`);
+    req.on("error", () => {
+      console.error("[qbo-attachable-upload] network error");
       reject(new Error(redactedUploadError(undefined)));
     });
 
@@ -171,7 +172,7 @@ async function uploadAttachableFile(
 
 export async function createQuickbooksAttachable(
   data: CreateAttachableInput
-): Promise<ToolResponse<any>> {
+, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
     // Build payload — same shape whether or not we're uploading binary content.
     const payload: Record<string, unknown> = { FileName: data.file_name };
@@ -246,21 +247,21 @@ export async function createQuickbooksAttachable(
         }
         payload.ContentType = effectiveContentType;
 
-        const { accessToken, realmId, isSandbox } =
-          await QuickbooksClient.getAuthCredentials();
+        const { accessToken, realmId, environment } =
+          await resolveQboHandlerDependencies(dependencies).rawQbo;
         const uploadResult = await uploadAttachableFile(
           fileSource,
           payload,
           accessToken,
           realmId,
-          isSandbox
+          environment === "sandbox"
         );
         return { result: uploadResult, isError: false, error: null };
       }
     }
 
     // ── Metadata-only path (preserved behavior, post-#41 auth) ────────────
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
     return new Promise((resolve) => {
       (quickbooks as any).createAttachable(payload, (err: any, created: any) => {
         if (err) resolve({ result: null, isError: true, error: formatError(err) });

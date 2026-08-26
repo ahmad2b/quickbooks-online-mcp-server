@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 import {
@@ -16,9 +17,9 @@ export interface UpdateVendorCreditInput {
   global_tax_calculation?: GlobalTaxCalculation;
 }
 
-export async function updateQuickbooksVendorCredit(data: UpdateVendorCreditInput): Promise<ToolResponse<any>> {
+export async function updateQuickbooksVendorCredit(data: UpdateVendorCreditInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     let payload: any;
     if (data.line_items) {

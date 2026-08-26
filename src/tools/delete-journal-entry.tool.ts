@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { deleteQuickbooksJournalEntry } from "../handlers/delete-quickbooks-journal-entry.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -14,8 +15,8 @@ const toolSchema = z.object({
 type ToolParams = z.infer<typeof toolSchema>;
 
 // Define the tool handler
-const toolHandler = async (args: any) => {
-  const response = await deleteQuickbooksJournalEntry(args.params.idOrEntity);
+const toolHandler = async (args: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await deleteQuickbooksJournalEntry(args.params.idOrEntity, dependencies);
 
   if (response.isError) {
     return {
@@ -37,5 +38,6 @@ export const DeleteJournalEntryTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "delete",
   handler: toolHandler,
-}; 
+};

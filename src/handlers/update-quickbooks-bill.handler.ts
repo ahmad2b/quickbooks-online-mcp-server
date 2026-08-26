@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -98,9 +99,9 @@ function isAutomatedSalesTax(preferences: any): boolean {
  * is expected, so it is surfaced as a non-blocking warning instead. Pass bill.Id plus
  * only the fields to change.
  */
-export async function updateQuickbooksBill(bill: any): Promise<ToolResponse<any>> {
+export async function updateQuickbooksBill(bill: any, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     if (!bill?.Id) {
       return { result: null, isError: true, error: "update-bill requires bill.Id" };

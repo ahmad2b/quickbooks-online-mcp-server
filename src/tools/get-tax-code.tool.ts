@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksTaxCode } from "../handlers/get-quickbooks-tax-code.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -8,10 +9,11 @@ const toolSchema = z.object({
   id: z.string().min(1).describe("Tax code ID"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await getQuickbooksTaxCode(params.id);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksTaxCode(params.id, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const GetTaxCodeTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const GetTaxCodeTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "read",  handler: toolHandler };

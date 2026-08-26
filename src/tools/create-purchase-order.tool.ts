@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { createQuickbooksPurchaseOrder } from "../handlers/create-quickbooks-purchase-order.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -20,8 +21,8 @@ const toolSchema = z.object({
   private_note: z.string().optional().describe("Private note"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await createQuickbooksPurchaseOrder(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await createQuickbooksPurchaseOrder(params, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error creating purchase order: ${response.error}` }] };
   }
@@ -37,5 +38,6 @@ export const CreatePurchaseOrderTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "write",
   handler: toolHandler,
 };

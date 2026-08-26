@@ -21,17 +21,16 @@ export type HttpConfig = {
   bodyLimit: string;
   requestTimeoutMs: number;
   rateLimitPerMinute: number;
-  databaseUrl: string;
-  dataEncryptionKey: string;
   requestStateKey: string;
-  authBindingClaim: string;
-  authAllowedBindingValues: string[];
-  quickbooksConnectionId: string;
-  quickbooksClientId: string;
-  quickbooksClientSecret: string;
-  quickbooksBootstrapEnvironment?: "sandbox" | "production";
-  quickbooksBootstrapRealmId?: string;
-  quickbooksBootstrapRefreshToken?: string;
+  operationFingerprintKey: string;
+  operationFingerprintKeyVersion: string;
+  authOrganizationClaim: string;
+  authConnectionClaim: string;
+  /** Opaque adapter references; transport is selected by DevRaftel deployment. */
+  qboExecutionLeaseProvider: string;
+  operationLedgerProvider: string;
+  rateLimitProvider: string;
+  workloadIdentity: string;
 };
 
 export class HttpConfigurationError extends Error {
@@ -64,22 +63,15 @@ function validateBase64Key(
   if (!value) return;
   try {
     const decoded = Buffer.from(value, "base64");
-    if (decoded.length !== expectedBytes || decoded.toString("base64").replace(/=+$/, "") !== value.replace(/=+$/, "")) {
+    if (
+      decoded.length !== expectedBytes ||
+      decoded.toString("base64").replace(/=+$/, "") !== value.replace(/=+$/, "")
+    ) {
       errors.push(name);
     }
   } catch {
     errors.push(name);
   }
-}
-
-function parseCsv(value: string | undefined, name: string, errors: string[]): string[] {
-  if (!value?.trim()) {
-    errors.push(name);
-    return [];
-  }
-  const values = value.split(",").map((item) => item.trim()).filter(Boolean);
-  if (values.length === 0 || values.some((item) => item === "*")) errors.push(name);
-  return values;
 }
 
 function hostnameFromAllowlistValue(value: string): string | undefined {
@@ -93,7 +85,12 @@ function hostnameFromAllowlistValue(value: string): string | undefined {
 }
 
 function parseHostAllowlist(value: string | undefined, name: string, errors: string[]): string[] {
-  const raw = parseCsv(value, name, errors);
+  if (!value?.trim()) {
+    errors.push(name);
+    return [];
+  }
+  const raw = value.split(",").map((item) => item.trim()).filter(Boolean);
+  if (raw.length === 0 || raw.some((item) => item === "*")) errors.push(name);
   const hosts = raw.map(hostnameFromAllowlistValue);
   if (hosts.some((host) => !host)) errors.push(name);
   return hosts.filter((host): host is string => Boolean(host));
@@ -146,15 +143,14 @@ function parseResourceUri(env: NodeJS.ProcessEnv, errors: string[]): URL | undef
 }
 
 /**
- * Validate all static HTTP requirements before creating a listener. Values are
- * never included in the thrown error, so startup diagnostics do not disclose
- * credentials or resource identifiers beyond variable names.
+ * Validate static HTTP/resource-server configuration before opening a
+ * listener. Customer credentials and database configuration are intentionally
+ * not accepted by this data plane.
  */
 export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig {
   const errors: string[] = [];
   const resourceUri = parseResourceUri(env, errors);
   const authIssuer = parseHttpsIssuer(env, errors);
-
   const authMetadataUrl = parseHttpsUrl(env, "MCP_AUTH_METADATA_URL", errors);
   const authJwksUrl = parseHttpsUrl(env, "MCP_AUTH_JWKS_URL", errors, false);
   const authIntrospectionUrl = parseHttpsUrl(env, "MCP_AUTH_INTROSPECTION_URL", errors, false);
@@ -168,45 +164,41 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
   const bodyLimit = env.MCP_BODY_LIMIT?.trim() || "1mb";
   const requestTimeoutMs = parsePositiveInt(env, "MCP_REQUEST_TIMEOUT_MS", 30_000, errors);
   const rateLimitPerMinute = parsePositiveInt(env, "MCP_RATE_LIMIT_PER_MINUTE", 120, errors);
-  const databaseUrl = required(env, "DATABASE_URL", errors);
-  const dataEncryptionKey = required(env, "MCP_DATA_ENCRYPTION_KEY", errors);
   const requestStateKey = required(env, "MCP_REQUEST_STATE_KEY", errors);
-  const authBindingClaim = required(env, "MCP_AUTH_BINDING_CLAIM", errors);
-  const authAllowedBindingValues = parseCsv(
-    env.MCP_AUTH_ALLOWED_BINDING_VALUES,
-    "MCP_AUTH_ALLOWED_BINDING_VALUES",
-    errors,
-  );
-  const quickbooksConnectionId = required(env, "QUICKBOOKS_CONNECTION_ID", errors);
-  const quickbooksClientId = required(env, "QUICKBOOKS_CLIENT_ID", errors);
-  const quickbooksClientSecret = required(env, "QUICKBOOKS_CLIENT_SECRET", errors);
-  const quickbooksBootstrapRealmId = env.QUICKBOOKS_REALM_ID?.trim() || undefined;
-  const quickbooksBootstrapRefreshToken = env.QUICKBOOKS_REFRESH_TOKEN?.trim() || undefined;
-  const bootstrapEnvironment = env.QUICKBOOKS_ENVIRONMENT?.trim();
-  if (bootstrapEnvironment && bootstrapEnvironment !== "sandbox" && bootstrapEnvironment !== "production") {
-    errors.push("QUICKBOOKS_ENVIRONMENT");
+  const operationFingerprintKey = required(env, "MCP_OPERATION_FINGERPRINT_KEY", errors);
+  const operationFingerprintKeyVersion = env.MCP_OPERATION_FINGERPRINT_KEY_VERSION?.trim() || "v1";
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(operationFingerprintKeyVersion)) {
+    errors.push("MCP_OPERATION_FINGERPRINT_KEY_VERSION");
   }
-  if (Boolean(quickbooksBootstrapRealmId) !== Boolean(quickbooksBootstrapRefreshToken)) {
-    errors.push("QUICKBOOKS_REALM_ID|QUICKBOOKS_REFRESH_TOKEN");
+  const authOrganizationClaim = required(env, "MCP_AUTH_ORGANIZATION_CLAIM", errors);
+  const authConnectionClaim = required(env, "MCP_AUTH_CONNECTION_CLAIM", errors);
+  if (authOrganizationClaim && authOrganizationClaim === authConnectionClaim) {
+    errors.push("MCP_AUTH_ORGANIZATION_CLAIM|MCP_AUTH_CONNECTION_CLAIM");
   }
-  if (quickbooksBootstrapRealmId && !bootstrapEnvironment) errors.push("QUICKBOOKS_ENVIRONMENT");
-  validateBase64Key(dataEncryptionKey, "MCP_DATA_ENCRYPTION_KEY", 32, errors);
+  const qboExecutionLeaseProvider = required(env, "QBO_EXECUTION_LEASE_PROVIDER", errors);
+  const operationLedgerProvider = required(env, "OPERATION_LEDGER_PROVIDER", errors);
+  const rateLimitProvider = required(env, "RATE_LIMIT_PROVIDER", errors);
+  const workloadIdentity = required(env, "MCP_WORKLOAD_IDENTITY", errors);
   validateBase64Key(requestStateKey, "MCP_REQUEST_STATE_KEY", 32, errors);
-  if (databaseUrl) {
-    try {
-      const parsed = new URL(databaseUrl);
-      if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") errors.push("DATABASE_URL");
-    } catch {
-      errors.push("DATABASE_URL");
-    }
-  }
+  validateBase64Key(operationFingerprintKey, "MCP_OPERATION_FINGERPRINT_KEY", 32, errors);
   if (authIntrospectionUrl && (!env.MCP_AUTH_INTROSPECTION_CLIENT_ID || !env.MCP_AUTH_INTROSPECTION_CLIENT_SECRET)) {
     errors.push("MCP_AUTH_INTROSPECTION_CLIENT_ID|MCP_AUTH_INTROSPECTION_CLIENT_SECRET");
   }
 
-  if (errors.length > 0 || !resourceUri || !authIssuer || !authMetadataUrl || !databaseUrl ||
-      !dataEncryptionKey || !requestStateKey || !authBindingClaim || !quickbooksConnectionId ||
-      !quickbooksClientId || !quickbooksClientSecret) {
+  if (
+    errors.length > 0 ||
+    !resourceUri ||
+    !authIssuer ||
+    !authMetadataUrl ||
+    !requestStateKey ||
+    !operationFingerprintKey ||
+    !authOrganizationClaim ||
+    !authConnectionClaim ||
+    !qboExecutionLeaseProvider ||
+    !operationLedgerProvider ||
+    !rateLimitProvider ||
+    !workloadIdentity
+  ) {
     throw new HttpConfigurationError([...new Set(errors)]);
   }
 
@@ -225,18 +217,14 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     bodyLimit,
     requestTimeoutMs,
     rateLimitPerMinute,
-    databaseUrl,
-    dataEncryptionKey,
     requestStateKey,
-    authBindingClaim,
-    authAllowedBindingValues,
-    quickbooksConnectionId,
-    quickbooksClientId,
-    quickbooksClientSecret,
-    ...(quickbooksBootstrapRealmId ? { quickbooksBootstrapRealmId } : {}),
-    ...(quickbooksBootstrapRefreshToken ? { quickbooksBootstrapRefreshToken } : {}),
-    ...(bootstrapEnvironment
-      ? { quickbooksBootstrapEnvironment: bootstrapEnvironment as "sandbox" | "production" }
-      : {}),
+    operationFingerprintKey,
+    operationFingerprintKeyVersion,
+    authOrganizationClaim,
+    authConnectionClaim,
+    qboExecutionLeaseProvider,
+    operationLedgerProvider,
+    rateLimitProvider,
+    workloadIdentity,
   };
 }

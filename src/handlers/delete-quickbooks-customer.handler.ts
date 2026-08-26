@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -6,9 +7,9 @@ import { formatError } from "../helpers/format-error.js";
  * Delete a customer (makes them inactive) in QuickBooks Online
  * Accepts either customer id or full customer entity as required by node-quickbooks
  */
-export async function deleteQuickbooksCustomer(idOrEntity: any): Promise<ToolResponse<any>> {
+export async function deleteQuickbooksCustomer(idOrEntity: any, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     // node‑quickbooks v1.0.32+ exposes deleteCustomer but some older builds don't.
     const hasDelete = typeof (quickbooks as any).deleteCustomer === "function";

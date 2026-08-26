@@ -1,13 +1,28 @@
 import { createRequestStateCodec, type ServerContext } from "@modelcontextprotocol/server";
-import type { HttpConfig } from "../http-config.js";
-import { configureQuickbooksClient } from "../clients/quickbooks-client.js";
 import { ClaimBindingAuthorizationPolicy } from "./authorization-policy.js";
-import type { MutationRequestState, RuntimeServices } from "./contracts.js";
-import { PostgresRuntimeStore } from "./postgres-runtime-store.js";
+import { RequestScopedQboClientFactory } from "../clients/quickbooks-client.js";
+import type {
+  MutationRequestState,
+  OperationLedger,
+  QboExecutionLeaseProvider,
+  RateLimiter,
+  RuntimeServices,
+} from "./contracts.js";
+import type { HttpConfig } from "../http-config.js";
 
 export type ProductionRuntime = {
   services: RuntimeServices;
   close: () => Promise<void>;
+};
+
+export type RuntimeProviderAdapters = {
+  qboExecutionLeaseProvider: QboExecutionLeaseProvider;
+  operationLedger: OperationLedger;
+  rateLimiter: RateLimiter;
+  qboClientFactory?: RuntimeServices["qboClientFactory"];
+  /** Must verify non-customer-specific adapter connectivity before binding HTTP. */
+  checkReadiness: () => Promise<void>;
+  close?: () => Promise<void>;
 };
 
 function claimsFromContext(context: ServerContext): Readonly<Record<string, unknown>> {
@@ -18,73 +33,62 @@ function claimsFromContext(context: ServerContext): Readonly<Record<string, unkn
 }
 
 /**
- * Initialize shared production infrastructure once per process/function
- * instance. This performs schema/configuration checks but deliberately does
- * not refresh QuickBooks tokens during cold start.
+ * Compose the MCP runtime only from provider adapters supplied by DevRaftel
+ * infrastructure. This repository intentionally does not select an internal
+ * HTTP/gRPC connection-service protocol or persist customer credentials.
  */
-export async function createProductionRuntime(config: HttpConfig): Promise<ProductionRuntime> {
-  const store = new PostgresRuntimeStore(config.databaseUrl, config.dataEncryptionKey);
-  try {
-    await store.initialize();
-    // Confirmation state expires after ten minutes. Prepared records older
-    // than that can never be resumed. A mutation still executing after
-    // fifteen minutes is conservatively ambiguous and must be reconciled.
-    await store.recoverStale(10 * 60 * 1000, 15 * 60 * 1000);
-    let connection = await store.load(config.quickbooksConnectionId);
-    if (!connection && config.quickbooksBootstrapRealmId && config.quickbooksBootstrapRefreshToken) {
-      await store.provision({
-        id: config.quickbooksConnectionId,
-        realmId: config.quickbooksBootstrapRealmId,
-        environment: config.quickbooksBootstrapEnvironment!,
-        refreshToken: config.quickbooksBootstrapRefreshToken,
-      });
-      connection = await store.load(config.quickbooksConnectionId);
-    }
-    if (!connection) {
-      throw new Error(
-        "QuickBooks connection is not provisioned; provide one-time bootstrap credentials or provision the database",
-      );
-    }
-    if (connection.status !== "active") {
-      throw new Error(`QuickBooks connection is ${connection.status}`);
-    }
-
-    configureQuickbooksClient({
-      clientId: config.quickbooksClientId,
-      clientSecret: config.quickbooksClientSecret,
-      connectionId: config.quickbooksConnectionId,
-      connectionStore: store,
-      environment: connection.environment,
-    });
-
-    const authorizationPolicy = new ClaimBindingAuthorizationPolicy({
-      bindingClaim: config.authBindingClaim,
-      allowedValues: config.authAllowedBindingValues,
-    });
-    const requestStateCodec = createRequestStateCodec<MutationRequestState>({
-      key: Buffer.from(config.requestStateKey, "base64"),
-      ttlSeconds: 10 * 60,
-      bind: (context) => {
-        const claims = claimsFromContext(context);
-        return [claims.iss, claims.sub, claims.client_id ?? claims.azp, context.mcpReq.method]
-          .map((value) => typeof value === "string" ? value : "")
-          .join("\0");
-      },
-    });
-
-    return {
-      services: {
-        connectionId: config.quickbooksConnectionId,
-        connectionStore: store,
-        rateLimiter: store,
-        authorizationPolicy,
-        operations: store,
-        requestStateCodec,
-      },
-      close: () => store.close(),
-    };
-  } catch (error) {
-    await store.close().catch(() => undefined);
-    throw error;
+export async function createProductionRuntime(
+  config: HttpConfig,
+  adapters?: RuntimeProviderAdapters,
+): Promise<ProductionRuntime> {
+  if (!adapters) {
+    throw new Error(
+      "MCP runtime providers are not configured; inject a connection-lease provider, operation ledger, rate limiter, and QBO client factory",
+    );
   }
+  try {
+    await adapters.checkReadiness();
+  } catch {
+    throw new Error("MCP runtime provider readiness failed");
+  }
+
+  const authorizationPolicy = new ClaimBindingAuthorizationPolicy({
+    issuer: config.authIssuer,
+    organizationClaim: config.authOrganizationClaim,
+    connectionClaim: config.authConnectionClaim,
+  });
+  const requestStateCodec = createRequestStateCodec<MutationRequestState>({
+    key: Buffer.from(config.requestStateKey, "base64"),
+    ttlSeconds: 10 * 60,
+    bind: (context) => {
+      const claims = claimsFromContext(context);
+      return [
+        claims.iss,
+        claims.sub,
+        claims.client_id ?? claims.azp,
+        claims[config.authOrganizationClaim],
+        claims[config.authConnectionClaim],
+        context.mcpReq.method,
+      ]
+        .map((value) => typeof value === "string" ? value : "")
+        .join("\0");
+    },
+  });
+
+  return {
+    services: {
+      qboClientFactory: adapters.qboClientFactory ?? new RequestScopedQboClientFactory(
+        adapters.qboExecutionLeaseProvider,
+      ),
+      rateLimiter: adapters.rateLimiter,
+      authorizationPolicy,
+      operationLedger: adapters.operationLedger,
+      operationFingerprint: {
+        key: Buffer.from(config.operationFingerprintKey, "base64"),
+        keyVersion: config.operationFingerprintKeyVersion,
+      },
+      requestStateCodec,
+    },
+    close: adapters.close ?? (async () => undefined),
+  };
 }

@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { createQuickbooksClass } from "../handlers/create-quickbooks-class.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -9,10 +10,11 @@ const toolSchema = z.object({
   parent_ref: z.string().optional().describe("Parent class ID for sub-classes"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await createQuickbooksClass(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await createQuickbooksClass(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `Class created:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const CreateClassTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const CreateClassTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "write",  handler: toolHandler };

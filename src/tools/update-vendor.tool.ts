@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { updateQuickbooksVendor } from "../handlers/update-quickbooks-vendor.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -28,8 +29,8 @@ const toolSchema = z.object({
   }),
 });
 
-const toolHandler = async (args: { [x: string]: any }) => {
-  const response = await updateQuickbooksVendor(args.params.vendor);
+const toolHandler = async (args: { [x: string]: any }, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await updateQuickbooksVendor(args.params.vendor, dependencies);
 
   if (response.isError) {
     return {
@@ -58,5 +59,6 @@ export const UpdateVendorTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "write",
   handler: toolHandler,
-}; 
+};

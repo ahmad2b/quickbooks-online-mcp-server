@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { updateQuickbooksTimeActivity } from "../handlers/update-quickbooks-time-activity.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -14,10 +15,11 @@ const toolSchema = z.object({
   item_ref: z.string().optional().describe("Service Item ID (ItemRef) — the QBO Item to associate with this time entry"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await updateQuickbooksTimeActivity(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await updateQuickbooksTimeActivity(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `Time activity updated:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const UpdateTimeActivityTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const UpdateTimeActivityTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "write",  handler: toolHandler };

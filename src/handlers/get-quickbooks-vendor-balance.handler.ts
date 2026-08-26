@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -8,9 +9,9 @@ export interface VendorBalanceOptions {
   summarize_column_by?: "Total" | "Month" | "Week" | "Days";
 }
 
-export async function getQuickbooksVendorBalance(options: VendorBalanceOptions): Promise<ToolResponse<any>> {
+export async function getQuickbooksVendorBalance(options: VendorBalanceOptions, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
     const params: Record<string, any> = {};
     if (options.report_date) params.report_date = options.report_date;
     if (options.vendor) params.vendor = options.vendor;

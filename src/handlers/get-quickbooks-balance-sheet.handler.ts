@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -9,10 +10,10 @@ export interface BalanceSheetOptions {
   summarize_column_by?: "Total" | "Month" | "Week" | "Days";
 }
 
-export async function getQuickbooksBalanceSheet(options: BalanceSheetOptions): Promise<ToolResponse<any>> {
+export async function getQuickbooksBalanceSheet(options: BalanceSheetOptions, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    // Use getInstance() so token freshness is checked on every call
-    const quickbooks = await QuickbooksClient.getInstance();
+    // The request-scoped factory has already validated the short-lived lease.
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     // Build params — Balance Sheet is a point-in-time report.
     // QBO silently ignores end_date when start_date is absent. To ensure the

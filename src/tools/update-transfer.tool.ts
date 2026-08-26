@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { updateQuickbooksTransfer } from "../handlers/update-quickbooks-transfer.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -13,10 +14,11 @@ const toolSchema = z.object({
   private_note: z.string().optional().describe("Private note"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await updateQuickbooksTransfer(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await updateQuickbooksTransfer(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `Transfer updated:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const UpdateTransferTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const UpdateTransferTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "write",  handler: toolHandler };

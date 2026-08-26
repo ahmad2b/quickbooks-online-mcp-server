@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { searchQuickbooksInvoices } from "../handlers/search-quickbooks-invoices.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -99,7 +100,7 @@ const RUNTIME_CRITERIA_SCHEMA = z.union([
 // Exposed schema – use broad type to prevent deep $ref issues
 const toolSchema = z.object({ criteria: z.any() });
 
-const toolHandler = async ({ params }: any) => {
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
   const { criteria } = params;
 
   // Validate runtime schema
@@ -112,7 +113,7 @@ const toolHandler = async ({ params }: any) => {
     };
   }
 
-  const response = await searchQuickbooksInvoices(criteria);
+  const response = await searchQuickbooksInvoices(criteria, dependencies);
 
   if (response.isError) {
     return {
@@ -134,5 +135,6 @@ export const SearchInvoicesTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
 };

@@ -1,10 +1,11 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
-export async function getQuickbooksTaxRate(id: string): Promise<ToolResponse<any>> {
+export async function getQuickbooksTaxRate(id: string, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
     return new Promise((resolve) => {
       (quickbooks as any).getTaxRate(id, (err: any, taxRate: any) => {
         if (err) resolve({ result: null, isError: true, error: formatError(err) });

@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -11,9 +12,9 @@ export interface CreateItemInput {
   description?: string;
 }
 
-export async function createQuickbooksItem(data: CreateItemInput): Promise<ToolResponse<any>> {
+export async function createQuickbooksItem(data: CreateItemInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     const payload: any = {
       Name: data.name,

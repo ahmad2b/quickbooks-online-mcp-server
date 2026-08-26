@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -46,9 +47,9 @@ export function buildVendorCreditLine(l: VendorCreditLineItemInput, idx: number)
   };
 }
 
-export async function createQuickbooksVendorCredit(data: CreateVendorCreditInput): Promise<ToolResponse<any>> {
+export async function createQuickbooksVendorCredit(data: CreateVendorCreditInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     const payload: any = {
       VendorRef: { value: data.vendor_ref },

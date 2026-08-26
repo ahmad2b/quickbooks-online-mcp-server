@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { searchQuickbooksVendors } from "../handlers/search-quickbooks-vendors.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -72,7 +73,8 @@ export const SearchVendorsTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
-  handler: async (args) => {
+  authority: "read",
+  handler: async (args, _context?: unknown, dependencies?: QboHandlerDependencies) => {
     const { criteria = [], ...options } = (args.params ?? {}) as z.infer<typeof toolSchema>;
 
     // build criteria to pass to SDK, supporting advanced operator syntax
@@ -91,7 +93,7 @@ export const SearchVendorsTool: ToolDefinition<typeof toolSchema> = {
       criteriaToSend = { ...options };
     }
 
-    const response = await searchQuickbooksVendors(criteriaToSend);
+    const response = await searchQuickbooksVendors(criteriaToSend, dependencies);
     if (response.isError) {
       return {
         content: [{ type: "text" as const, text: `Error searching vendors: ${response.error}` }],
@@ -106,4 +108,4 @@ export const SearchVendorsTool: ToolDefinition<typeof toolSchema> = {
       ],
     };
   },
-}; 
+};

@@ -10,6 +10,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error("[mcp] startup failed", error instanceof Error ? error.message : String(error));
+  // Startup errors may contain provider URLs or configuration details. Keep
+  // the process log metadata-only; operators can inspect the deployment's
+  // authenticated readiness telemetry separately.
+  console.error("[mcp] startup failed", error instanceof Error ? error.name : "unknown");
   process.exitCode = 1;
 });

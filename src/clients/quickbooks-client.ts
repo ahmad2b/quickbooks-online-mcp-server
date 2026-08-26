@@ -1,205 +1,173 @@
 import QuickBooks from "node-quickbooks";
-import OAuthClient from "intuit-oauth";
 import type {
-  QuickBooksConnection,
-  QuickBooksConnectionStore,
+  ExecutionContext,
+  QboClientFactory,
+  QboClientLease,
+  QboExecutionLease,
+  QboExecutionLeaseProvider,
+  QboHandlerDependencies,
+  QboRawClient,
+  QuickBooksEnvironment,
 } from "../runtime/contracts.js";
 
-type RefreshResult = {
-  access_token: string;
-  expires_in?: number;
-  refresh_token?: string;
-  x_refresh_token_expires_in?: number;
-};
+export type QuickBooksConstructor = new (
+  consumerKey: string,
+  consumerSecret: string,
+  accessToken: string,
+  tokenSecret: boolean | string,
+  realmId: string,
+  useSandbox?: boolean,
+  debug?: boolean,
+  minorversion?: string | number | null,
+  oauthVersion?: string,
+  refreshToken?: string,
+) => QuickBooks;
 
-type QuickBooksClientConfig = {
-  clientId: string;
-  clientSecret: string;
-  connectionId: string;
-  connectionStore: QuickBooksConnectionStore;
-  environment: "sandbox" | "production";
-};
+export class QboExecutionError extends Error {
+  constructor(
+    public readonly code:
+      | "QBO_EXECUTION_LEASE_UNAVAILABLE"
+      | "QBO_EXECUTION_LEASE_INVALID",
+    message: string,
+  ) {
+    super(message);
+    this.name = "QboExecutionError";
+  }
+}
+
+function isEnvironment(value: unknown): value is QuickBooksEnvironment {
+  return value === "sandbox" || value === "production";
+}
+
+function validDate(value: unknown): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+function assertLease(
+  context: ExecutionContext,
+  lease: QboExecutionLease,
+  now: () => number,
+  safetyMarginMs: number,
+): void {
+  if (!lease || typeof lease !== "object") {
+    throw new QboExecutionError("QBO_EXECUTION_LEASE_INVALID", "The execution lease is invalid");
+  }
+  if (typeof lease.leaseId !== "string" || lease.leaseId.length === 0 ||
+      typeof lease.qboConnectionId !== "string" || lease.qboConnectionId.length === 0 ||
+      typeof lease.accessToken !== "string" || lease.accessToken.length === 0 ||
+      typeof lease.realmId !== "string" || lease.realmId.length === 0 ||
+      typeof lease.credentialVersion !== "string" || lease.credentialVersion.length === 0 ||
+      !isEnvironment(lease.environment) || !validDate(lease.expiresAt)) {
+    throw new QboExecutionError("QBO_EXECUTION_LEASE_INVALID", "The execution lease is incomplete");
+  }
+  if (lease.qboConnectionId !== context.qboConnectionId) {
+    throw new QboExecutionError("QBO_EXECUTION_LEASE_INVALID", "The execution lease does not match the requested connection");
+  }
+  if (lease.expiresAt.getTime() <= now() + safetyMarginMs) {
+    throw new QboExecutionError("QBO_EXECUTION_LEASE_INVALID", "The execution lease is expired or too close to expiry");
+  }
+}
 
 /**
- * HTTP-only QuickBooks client. Durable connection state is mandatory: no file
- * token store, browser flow, localhost callback, or process-only rotation path
- * exists in this runtime.
+ * Constructs a fresh node-quickbooks and raw credential context for each
+ * authorized request. The connection service supplies only a short-lived
+ * access token; the MCP process has no refresh-token or client-secret input.
  */
-export class QuickbooksClient {
-  private static readonly TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
-  private readonly oauthClient: OAuthClient;
-  private accessToken?: string;
-  private accessTokenExpiry?: Date;
-  private refreshToken?: string;
-  private realmId?: string;
-  private quickbooksInstance?: QuickBooks;
-  private refreshInFlight?: Promise<{ access_token: string; expires_in: number }>;
-  private authInFlight?: Promise<QuickBooks>;
+export class RequestScopedQboClientFactory implements QboClientFactory {
+  private readonly QuickBooksConstructor: QuickBooksConstructor;
+  private readonly now: () => number;
+  private readonly safetyMarginMs: number;
 
-  constructor(private readonly config: QuickBooksClientConfig) {
-    this.oauthClient = new OAuthClient({
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-      environment: config.environment,
-      // Runtime refresh does not use a redirect URI. The library requires a
-      // value in its constructor, so use an intentionally non-routable marker.
-      redirectUri: "https://invalid.local/operator-provisioning-only",
-    });
-  }
-
-  private isTokenExpiredOrExpiringSoon(): boolean {
-    if (!this.accessToken || !this.accessTokenExpiry) return true;
-    return this.accessTokenExpiry.getTime() <=
-      Date.now() + QuickbooksClient.TOKEN_REFRESH_BUFFER_MS;
-  }
-
-  private applyConnection(connection: QuickBooksConnection): void {
-    this.realmId = connection.realmId;
-    this.refreshToken = connection.refreshToken;
-    this.accessToken = connection.accessToken;
-    this.accessTokenExpiry = connection.accessTokenExpiresAt;
-  }
-
-  private async loadConnection(): Promise<QuickBooksConnection> {
-    const connection = await this.config.connectionStore.load(this.config.connectionId);
-    if (!connection) throw new Error("QuickBooks connection is not provisioned");
-    if (connection.status !== "active") throw new Error(`QuickBooks connection is ${connection.status}`);
-    if (connection.environment !== this.config.environment) {
-      throw new Error("QuickBooks connection environment does not match runtime configuration");
+  constructor(
+    private readonly provider: QboExecutionLeaseProvider,
+    options: {
+      QuickBooksConstructor?: QuickBooksConstructor;
+      now?: () => number;
+      leaseSafetyMarginMs?: number;
+    } = {},
+  ) {
+    this.QuickBooksConstructor = options.QuickBooksConstructor ?? QuickBooks;
+    this.now = options.now ?? Date.now;
+    this.safetyMarginMs = options.leaseSafetyMarginMs ?? 5_000;
+    if (!Number.isInteger(this.safetyMarginMs) || this.safetyMarginMs < 0) {
+      throw new Error("Lease safety margin must be a non-negative integer");
     }
-    this.applyConnection(connection);
-    return connection;
   }
 
-  private classifyAuthInvalidation(raw: unknown): boolean {
-    let current: unknown = raw;
-    for (let depth = 0; depth < 4 && current != null; depth += 1) {
-      const record = typeof current === "object" ? current as Record<string, unknown> : undefined;
-      const message = (current instanceof Error ? current.message : String(current)).toLowerCase();
-      const status = typeof record?.status === "number"
-        ? record.status
-        : Number(message.match(/status code (\d{3})\b/)?.[1]);
-      if (message.includes("invalid_grant") || status === 400 || status === 401) return true;
-      current = record?.cause;
+  async create(context: ExecutionContext): Promise<QboClientLease> {
+    let lease: QboExecutionLease | undefined;
+    try {
+      lease = await this.provider.acquire(context);
+    } catch (error) {
+      if (error instanceof QboExecutionError) throw error;
+      throw new QboExecutionError(
+        "QBO_EXECUTION_LEASE_UNAVAILABLE",
+        "The QuickBooks execution lease is unavailable",
+      );
     }
-    return false;
-  }
 
-  private async performRefresh(refreshToken: string): Promise<RefreshResult> {
-    const response = await this.oauthClient.refreshUsingToken(refreshToken);
-    return response.token as unknown as RefreshResult;
-  }
-
-  async refreshAccessToken(): Promise<{ access_token: string; expires_in: number }> {
-    if (this.refreshInFlight) return this.refreshInFlight;
-    this.refreshInFlight = this.config.connectionStore
-      .withRefreshLock(this.config.connectionId, async (current, persist) => {
-        this.applyConnection(current);
-        if (!this.isTokenExpiredOrExpiringSoon() && this.accessToken && this.accessTokenExpiry) {
-          return {
-            access_token: this.accessToken,
-            expires_in: Math.max(1, Math.floor((this.accessTokenExpiry.getTime() - Date.now()) / 1000)),
-          };
-        }
-
-        const token = await this.performRefresh(current.refreshToken);
-        if (!token.access_token) throw new Error("QuickBooks refresh response did not contain an access token");
-        const expiresIn = token.expires_in || 3600;
-        const updated = await persist({
-          accessToken: token.access_token,
-          accessTokenExpiresAt: new Date(Date.now() + expiresIn * 1000),
-          refreshToken: token.refresh_token || current.refreshToken,
-          ...(typeof token.x_refresh_token_expires_in === "number"
-            ? { refreshTokenExpiresAt: new Date(Date.now() + token.x_refresh_token_expires_in * 1000) }
-            : current.refreshTokenExpiresAt
-              ? { refreshTokenExpiresAt: current.refreshTokenExpiresAt }
-              : {}),
-        });
-        // Persistence is deliberately before exposure: a rotated refresh token
-        // that was not durably committed must fail the request.
-        this.applyConnection(updated);
-        return { access_token: token.access_token, expires_in: expiresIn };
-      })
-      .catch(async (error: unknown) => {
-        if (this.classifyAuthInvalidation(error)) {
-          await this.config.connectionStore
-            .markReauthorizationRequired(this.config.connectionId)
-            .catch(() => undefined);
-          throw new Error("QuickBooks authorization requires operator reauthorization");
-        }
-        throw error;
-      })
-      .finally(() => {
-        this.refreshInFlight = undefined;
-      });
-    return this.refreshInFlight;
-  }
-
-  async authenticate(): Promise<QuickBooks> {
-    if (this.authInFlight) return this.authInFlight;
-    this.authInFlight = (async () => {
-      await this.loadConnection();
-      if (this.isTokenExpiredOrExpiringSoon()) await this.refreshAccessToken();
-      if (!this.accessToken || !this.refreshToken || !this.realmId) {
-        throw new Error("QuickBooks connection credentials are incomplete");
-      }
-      this.quickbooksInstance = new QuickBooks(
-        this.config.clientId,
-        this.config.clientSecret,
-        this.accessToken,
+    try {
+      assertLease(context, lease, this.now, this.safetyMarginMs);
+      // node-quickbooks requires consumer key/secret constructor positions even
+      // for bearer-token calls. Empty markers avoid introducing Intuit client
+      // secrets into this data plane; refresh/exchange belongs to the broker.
+      const qbo = new this.QuickBooksConstructor(
+        "",
+        "",
+        lease.accessToken,
         false,
-        this.realmId,
-        this.config.environment === "sandbox",
+        lease.realmId,
+        lease.environment === "sandbox",
         false,
         null,
         "2.0",
-        this.refreshToken,
       );
-      return this.quickbooksInstance;
-    })().finally(() => {
-      this.authInFlight = undefined;
-    });
-    return this.authInFlight;
-  }
-
-  static async getInstance(): Promise<QuickBooks> {
-    const client = configuredClient();
-    if (client.isTokenExpiredOrExpiringSoon() || !client.quickbooksInstance) {
-      await client.authenticate();
+      const rawQbo: QboRawClient = Object.freeze({
+        accessToken: lease.accessToken,
+        realmId: lease.realmId,
+        environment: lease.environment,
+      });
+      let closed = false;
+      return {
+        qbo,
+        rawQbo,
+        leaseId: lease.leaseId,
+        expiresAt: lease.expiresAt,
+        close: async () => {
+          if (closed) return;
+          closed = true;
+          // A provider may use explicit lease release, but the port does not
+          // require a network round trip for every request. Object references
+          // are dropped by the request scope after this callback returns.
+          if ("release" in this.provider && typeof this.provider.release === "function") {
+            await this.provider.release(lease, context);
+          }
+        },
+      };
+    } catch (error) {
+      if (lease && typeof this.provider.release === "function") {
+        await this.provider.release(lease, context).catch(() => undefined);
+      }
+      if (error instanceof QboExecutionError) throw error;
+      throw new QboExecutionError("QBO_EXECUTION_LEASE_INVALID", "The QuickBooks execution lease is invalid");
     }
-    return client.quickbooksInstance!;
-  }
-
-  static async getAuthCredentials(): Promise<{
-    accessToken: string;
-    realmId: string;
-    isSandbox: boolean;
-  }> {
-    const client = configuredClient();
-    if (client.isTokenExpiredOrExpiringSoon() || !client.accessToken || !client.realmId) {
-      await client.authenticate();
-    }
-    if (!client.accessToken || !client.realmId) throw new Error("QuickBooks connection is unavailable");
-    return {
-      accessToken: client.accessToken,
-      realmId: client.realmId,
-      isSandbox: client.config.environment === "sandbox",
-    };
-  }
-
-  getQuickbooks(): QuickBooks {
-    if (!this.quickbooksInstance) throw new Error("QuickBooks connection is not authenticated");
-    return this.quickbooksInstance;
   }
 }
 
-export let quickbooksClient: QuickbooksClient | undefined;
-
-function configuredClient(): QuickbooksClient {
-  if (!quickbooksClient) throw new Error("QuickBooks production runtime is not initialized");
-  return quickbooksClient;
-}
-
-export function configureQuickbooksClient(config: QuickBooksClientConfig): void {
-  quickbooksClient = new QuickbooksClient(config);
+/**
+ * Resolve the explicit request-scoped dependencies passed by the tool
+ * registration seam. Keeping this small adapter in the client module lets
+ * business handlers share one failure mode without reintroducing ambient or
+ * process-global credential lookup.
+ */
+export function resolveQboHandlerDependencies(
+  dependencies?: QboHandlerDependencies,
+): QboHandlerDependencies {
+  if (!dependencies) {
+    throw new QboExecutionError(
+      "QBO_EXECUTION_LEASE_UNAVAILABLE",
+      "QuickBooks execution dependencies were not provided",
+    );
+  }
+  return dependencies;
 }

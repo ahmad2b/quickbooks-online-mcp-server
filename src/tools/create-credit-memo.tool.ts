@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { createQuickbooksCreditMemo } from "../handlers/create-quickbooks-credit-memo.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -22,8 +23,8 @@ const toolSchema = z.object({
   global_tax_calculation: z.enum(["TaxExcluded", "TaxInclusive", "NotApplicable"]).optional().describe("Non-US companies only: whether unit prices exclude or include tax"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await createQuickbooksCreditMemo(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await createQuickbooksCreditMemo(params, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error creating credit memo: ${response.error}` }] };
   }
@@ -39,5 +40,6 @@ export const CreateCreditMemoTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "write",
   handler: toolHandler,
 };

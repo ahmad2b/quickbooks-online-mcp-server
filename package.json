@@ -27,10 +27,8 @@
         "@modelcontextprotocol/node": "2.0.0",
         "@modelcontextprotocol/server": "2.0.0",
         "express": "5.1.0",
-        "intuit-oauth": "^4.0.0",
         "jose": "^6.2.10",
         "node-quickbooks": "^2.0.43",
-        "pg": "^8.16.3",
         "zod": "^4.2.0"
     },
     "devDependencies": {
@@ -39,7 +37,6 @@
         "@types/express": "^5.0.6",
         "@types/jest": "^30.0.0",
         "@types/node": "^22.13.10",
-        "@types/pg": "^8.15.5",
         "eslint": "^9.22.0",
         "eslint-config-prettier": "^10.1.1",
         "globals": "^16.0.0",

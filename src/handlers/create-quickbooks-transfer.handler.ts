@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -10,9 +11,9 @@ export interface CreateTransferInput {
   private_note?: string;
 }
 
-export async function createQuickbooksTransfer(data: CreateTransferInput): Promise<ToolResponse<any>> {
+export async function createQuickbooksTransfer(data: CreateTransferInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     const payload: any = {
       FromAccountRef: { value: data.from_account_ref },

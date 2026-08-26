@@ -1,162 +1,97 @@
-import { beforeEach, describe, expect, it, jest } from "@jest/globals";
+import { describe, expect, it, jest } from "@jest/globals";
+import { RequestScopedQboClientFactory, QboExecutionError } from "../../../src/clients/quickbooks-client";
 import type {
-  QuickBooksConnection,
-  QuickBooksConnectionStore,
-  QuickBooksTokenUpdate,
+  ExecutionContext,
+  QboExecutionLease,
+  QboExecutionLeaseProvider,
 } from "../../../src/runtime/contracts";
 
-const refreshDispatch = jest.fn<(token: string) => Promise<{ token: Record<string, unknown> }>>();
+const context: ExecutionContext = Object.freeze({
+  requestId: "request-1",
+  issuer: "https://issuer.example",
+  subjectId: "user-1",
+  oauthClientId: "client-1",
+  organizationId: "org-1",
+  qboConnectionId: "connection-1",
+  scopes: new Set<"quickbooks.read">(["quickbooks.read"]),
+});
 
-jest.unstable_mockModule("intuit-oauth", () => ({
-  default: class MockOAuthClient {
-    refreshUsingToken(token: string) {
-      return refreshDispatch(token);
-    }
-  },
-}));
-
-const constructedQuickBooks = jest.fn();
-jest.unstable_mockModule("node-quickbooks", () => ({
-  default: class MockQuickBooks {
-    constructor(...args: unknown[]) {
-      constructedQuickBooks(...args);
-    }
-  },
-}));
-
-const { QuickbooksClient } = await import("../../../src/clients/quickbooks-client");
-
-function connection(overrides: Partial<QuickBooksConnection> = {}): QuickBooksConnection {
+function lease(overrides: Partial<QboExecutionLease> = {}): QboExecutionLease {
   return {
-    id: "primary",
+    leaseId: "lease-1",
+    qboConnectionId: "connection-1",
+    accessToken: "access-1",
     realmId: "realm-1",
     environment: "sandbox",
-    refreshToken: "refresh-1",
-    version: 1,
-    status: "active",
+    expiresAt: new Date(Date.now() + 60_000),
+    credentialVersion: "credential-1",
     ...overrides,
   };
 }
 
-function makeStore(initial = connection()) {
-  let current = initial;
-  const persist = jest.fn(async (tokens: QuickBooksTokenUpdate) => {
-    current = {
-      ...current,
-      accessToken: tokens.accessToken,
-      accessTokenExpiresAt: tokens.accessTokenExpiresAt,
-      refreshToken: tokens.refreshToken,
-      refreshTokenExpiresAt: tokens.refreshTokenExpiresAt,
-      version: current.version + 1,
-    };
-    return current;
-  });
-  const withRefreshLock: QuickBooksConnectionStore["withRefreshLock"] = async (_id, callback) =>
-    callback(current, persist);
-  const store: QuickBooksConnectionStore = {
-    load: jest.fn(async () => current),
-    provision: jest.fn(async () => undefined),
-    withRefreshLock: jest.fn(withRefreshLock) as QuickBooksConnectionStore["withRefreshLock"],
-    markReauthorizationRequired: jest.fn(async () => undefined),
+function provider(result: QboExecutionLease | Error): QboExecutionLeaseProvider {
+  return {
+    acquire: jest.fn(async () => {
+      if (result instanceof Error) throw result;
+      return result;
+    }),
   };
-  return { store, persist, current: () => current };
 }
 
-function makeClient(store: QuickBooksConnectionStore, environment: "sandbox" | "production" = "sandbox") {
-  return new QuickbooksClient({
-    clientId: "client-id",
-    clientSecret: "client-secret",
-    connectionId: "primary",
-    connectionStore: store,
-    environment,
-  });
-}
-
-beforeEach(() => {
-  refreshDispatch.mockReset();
-  constructedQuickBooks.mockReset();
-});
-
-describe("durable QuickBooks token rotation", () => {
-  it("persists access and rotated refresh tokens before returning", async () => {
-    const fixture = makeStore();
-    refreshDispatch.mockResolvedValue({
-      token: { access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2" },
+describe("RequestScopedQboClientFactory", () => {
+  it("creates a fresh SDK/raw pair from a matching short-lived lease", async () => {
+    const constructed: unknown[][] = [];
+    class FakeQuickBooks {
+      constructor(...args: unknown[]) {
+        constructed.push(args);
+      }
+    }
+    const factory = new RequestScopedQboClientFactory(provider(lease()), {
+      QuickBooksConstructor: FakeQuickBooks as never,
+      now: () => Date.now(),
     });
 
-    await expect(makeClient(fixture.store).refreshAccessToken()).resolves.toEqual({
-      access_token: "access-2",
-      expires_in: 3600,
-    });
-    expect(fixture.persist).toHaveBeenCalledTimes(1);
-    expect(fixture.current().refreshToken).toBe("refresh-2");
-  });
+    const result = await factory.create(context);
 
-  it("coalesces concurrent refresh attempts in one instance", async () => {
-    const fixture = makeStore();
-    refreshDispatch.mockResolvedValue({ token: { access_token: "access-2", expires_in: 3600 } });
-    const client = makeClient(fixture.store);
-
-    await Promise.all([client.refreshAccessToken(), client.refreshAccessToken()]);
-
-    expect(fixture.store.withRefreshLock).toHaveBeenCalledTimes(1);
-    expect(refreshDispatch).toHaveBeenCalledTimes(1);
-  });
-
-  it("reuses a valid access token loaded under the distributed lock", async () => {
-    const fixture = makeStore(connection({
-      accessToken: "already-valid",
-      accessTokenExpiresAt: new Date(Date.now() + 30 * 60 * 1000),
-    }));
-
-    await expect(makeClient(fixture.store).refreshAccessToken()).resolves.toMatchObject({
-      access_token: "already-valid",
-    });
-    expect(refreshDispatch).not.toHaveBeenCalled();
-    expect(fixture.persist).not.toHaveBeenCalled();
-  });
-
-  it("fails the request when durable token persistence fails", async () => {
-    const fixture = makeStore();
-    (fixture.persist as jest.MockedFunction<typeof fixture.persist>).mockRejectedValueOnce(
-      new Error("database unavailable"),
-    );
-    refreshDispatch.mockResolvedValue({
-      token: { access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2" },
-    });
-
-    await expect(makeClient(fixture.store).refreshAccessToken()).rejects.toThrow("database unavailable");
-  });
-
-  it("marks an invalid refresh token for operator reauthorization", async () => {
-    const fixture = makeStore();
-    refreshDispatch.mockRejectedValue(new Error("Request failed with status code 400"));
-
-    await expect(makeClient(fixture.store).refreshAccessToken()).rejects.toThrow(
-      "operator reauthorization",
-    );
-    expect(fixture.store.markReauthorizationRequired).toHaveBeenCalledWith("primary");
-  });
-
-  it("keeps transient refresh failures retryable", async () => {
-    const fixture = makeStore();
-    refreshDispatch.mockRejectedValue(new Error("Request failed with status code 503"));
-
-    await expect(makeClient(fixture.store).refreshAccessToken()).rejects.toThrow("503");
-    expect(fixture.store.markReauthorizationRequired).not.toHaveBeenCalled();
-  });
-
-  it("builds the QBO SDK client from durable credentials", async () => {
-    const fixture = makeStore(connection({
+    expect(constructed).toHaveLength(1);
+    expect(constructed[0]?.slice(0, 5)).toEqual(["", "", "access-1", false, "realm-1"]);
+    expect(result.rawQbo).toEqual({
       accessToken: "access-1",
-      accessTokenExpiresAt: new Date(Date.now() + 30 * 60 * 1000),
-    }));
+      realmId: "realm-1",
+      environment: "sandbox",
+    });
+    await result.close();
+    await result.close();
+  });
 
-    await makeClient(fixture.store).authenticate();
+  it("rejects a lease for another connection before constructing a client", async () => {
+    const factory = new RequestScopedQboClientFactory(provider(lease({ qboConnectionId: "connection-2" })));
+    await expect(factory.create(context)).rejects.toMatchObject({ code: "QBO_EXECUTION_LEASE_INVALID" });
+  });
 
-    expect(constructedQuickBooks).toHaveBeenCalledWith(
-      "client-id", "client-secret", "access-1", false, "realm-1", true,
-      false, null, "2.0", "refresh-1",
+  it("rejects expired and near-expiry leases", async () => {
+    const expired = new RequestScopedQboClientFactory(
+      provider(lease({ expiresAt: new Date(1_000) })),
+      { now: () => 1_000, leaseSafetyMarginMs: 5_000 },
     );
+    await expect(expired.create(context)).rejects.toBeInstanceOf(QboExecutionError);
+  });
+
+  it("turns broker failures into a stable unavailable error", async () => {
+    const factory = new RequestScopedQboClientFactory(provider(new Error("network details")));
+    await expect(factory.create(context)).rejects.toMatchObject({ code: "QBO_EXECUTION_LEASE_UNAVAILABLE" });
+  });
+
+  it("calls an optional provider release exactly once", async () => {
+    const release = jest.fn(async () => undefined);
+    const leaseProvider: QboExecutionLeaseProvider = { acquire: async () => lease(), release };
+    class FakeQuickBooks {}
+    const factory = new RequestScopedQboClientFactory(leaseProvider, {
+      QuickBooksConstructor: FakeQuickBooks as never,
+    });
+    const result = await factory.create(context);
+    await result.close();
+    await result.close();
+    expect(release).toHaveBeenCalledTimes(1);
   });
 });

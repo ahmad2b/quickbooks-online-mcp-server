@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { readQuickbooksItem } from "../handlers/read-quickbooks-item.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -9,9 +10,9 @@ const toolSchema = z.object({
   item_id: z.string().min(1, { message: "Item ID is required" }),
 });
 
-const toolHandler = async ({ params }: any) => {
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
   const { item_id } = params;
-  const response = await readQuickbooksItem(item_id);
+  const response = await readQuickbooksItem(item_id, dependencies);
 
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error reading item ${item_id}: ${response.error}` }] };
@@ -29,5 +30,6 @@ export const ReadItemTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
-}; 
+};

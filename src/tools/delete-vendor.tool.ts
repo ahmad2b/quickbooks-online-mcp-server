@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { deleteQuickbooksVendor } from "../handlers/delete-quickbooks-vendor.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -11,8 +12,8 @@ const toolSchema = z.object({
   }),
 });
 
-const toolHandler = async (args: { [x: string]: any }) => {
-  const response = await deleteQuickbooksVendor(args.params.vendor);
+const toolHandler = async (args: { [x: string]: any }, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await deleteQuickbooksVendor(args.params.vendor, dependencies);
 
   if (response.isError) {
     return {
@@ -41,5 +42,6 @@ export const DeleteVendorTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "delete",
   handler: toolHandler,
-}; 
+};

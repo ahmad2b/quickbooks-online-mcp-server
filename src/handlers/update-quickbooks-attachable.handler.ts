@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -11,9 +12,9 @@ export interface UpdateAttachableInput {
   category?: string;
 }
 
-export async function updateQuickbooksAttachable(data: UpdateAttachableInput): Promise<ToolResponse<any>> {
+export async function updateQuickbooksAttachable(data: UpdateAttachableInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
     const payload: any = { Id: data.id, SyncToken: data.sync_token, sparse: true };
     if (data.file_name) payload.FileName = data.file_name;
     if (data.content_type) payload.ContentType = data.content_type;

@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -8,9 +9,9 @@ export interface SearchAttachablesInput {
   limit?: number;
 }
 
-export async function searchQuickbooksAttachables(data: SearchAttachablesInput): Promise<ToolResponse<any>> {
+export async function searchQuickbooksAttachables(data: SearchAttachablesInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
     const criteria: Record<string, any> = {};
     if (data.file_name) criteria.FileName = data.file_name;
     if (data.content_type) criteria.ContentType = data.content_type;

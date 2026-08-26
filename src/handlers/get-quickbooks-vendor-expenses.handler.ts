@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -10,9 +11,9 @@ export interface VendorExpensesOptions {
   accounting_method?: "Cash" | "Accrual";
 }
 
-export async function getQuickbooksVendorExpenses(options: VendorExpensesOptions): Promise<ToolResponse<any>> {
+export async function getQuickbooksVendorExpenses(options: VendorExpensesOptions, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
     const params: Record<string, any> = {};
     if (options.start_date) params.start_date = options.start_date;
     if (options.end_date) params.end_date = options.end_date;

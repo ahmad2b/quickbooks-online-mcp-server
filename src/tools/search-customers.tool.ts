@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { searchQuickbooksCustomers } from "../handlers/search-quickbooks-customers.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -53,7 +54,7 @@ const toolSchema = z.object({
   count: z.boolean().optional(),
 });
 
-const toolHandler = async (args: any) => {
+const toolHandler = async (args: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
   const { criteria = [], ...options } = (args.params ?? {}) as z.infer<typeof toolSchema>;
 
   // Build criteria to send to SDK. If user provided the advanced array with field/operator/value
@@ -74,7 +75,7 @@ const toolHandler = async (args: any) => {
     criteriaToSend = { ...options };
   }
 
-  const response = await searchQuickbooksCustomers(criteriaToSend);
+  const response = await searchQuickbooksCustomers(criteriaToSend, dependencies);
   if (response.isError) {
     return {
       content: [{ type: "text" as const, text: `Error searching customers: ${response.error}` }],
@@ -94,5 +95,6 @@ export const SearchCustomersTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
-}; 
+};

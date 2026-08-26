@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksAccount } from "../handlers/get-quickbooks-account.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -8,8 +9,8 @@ const toolSchema = z.object({
   id: z.string().min(1).describe("The QuickBooks Account ID"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await getQuickbooksAccount(params.id);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksAccount(params.id, dependencies);
 
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error getting account: ${response.error}` }] };
@@ -27,5 +28,6 @@ export const GetAccountTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
 };

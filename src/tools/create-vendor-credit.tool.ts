@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { createQuickbooksVendorCredit } from "../handlers/create-quickbooks-vendor-credit.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -51,10 +52,11 @@ const toolSchema = z.object({
   global_tax_calculation: globalTaxCalculationSchema.optional(),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await createQuickbooksVendorCredit(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await createQuickbooksVendorCredit(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `Vendor credit created:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const CreateVendorCreditTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const CreateVendorCreditTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "write",  handler: toolHandler };

@@ -28,4 +28,13 @@ describe('formatError', () => {
   it('should handle number errors', () => {
     expect(formatError(404)).toBe('Unknown error: 404');
   });
+
+  it('redacts structured provider bodies and credentials', () => {
+    expect(formatError(new Error('{"Fault":{"realmId":"secret"}}'))).toBe(
+      'Error: The upstream QuickBooks request failed',
+    );
+    expect(formatError('Bearer access_token=secret-value')).toBe(
+      'Error: The upstream QuickBooks request failed',
+    );
+  });
 });

@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksGeneralLedger } from "../handlers/get-quickbooks-general-ledger.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -13,10 +14,11 @@ const toolSchema = z.object({
   sort_by: z.string().optional().describe("Field to sort by"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await getQuickbooksGeneralLedger(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksGeneralLedger(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `General Ledger Report:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const GetGeneralLedgerTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const GetGeneralLedgerTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "read",  handler: toolHandler };

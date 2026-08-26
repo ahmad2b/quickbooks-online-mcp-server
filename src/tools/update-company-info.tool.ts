@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { updateQuickbooksCompanyInfo } from "../handlers/update-quickbooks-company-info.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -21,10 +22,11 @@ const toolSchema = z.object({
   web_addr: z.string().optional().describe("Website URL"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await updateQuickbooksCompanyInfo(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await updateQuickbooksCompanyInfo(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `Company info updated:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const UpdateCompanyInfoTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const UpdateCompanyInfoTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "write",  handler: toolHandler };

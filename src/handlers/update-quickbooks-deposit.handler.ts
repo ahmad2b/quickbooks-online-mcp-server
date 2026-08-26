@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -8,9 +9,9 @@ export interface UpdateDepositInput {
   private_note?: string;
 }
 
-export async function updateQuickbooksDeposit(data: UpdateDepositInput): Promise<ToolResponse<any>> {
+export async function updateQuickbooksDeposit(data: UpdateDepositInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     // QBO rejects a sparse Deposit update that omits DepositToAccountRef (and
     // other required fields) — unlike Purchase, sparse=true isn't honored here.

@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -13,9 +14,9 @@ export interface CreateTermInput {
   discount_day_of_month?: number;
 }
 
-export async function createQuickbooksTerm(data: CreateTermInput): Promise<ToolResponse<any>> {
+export async function createQuickbooksTerm(data: CreateTermInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
     const payload: any = { Name: data.name };
     if (data.due_days !== undefined) payload.DueDays = data.due_days;
     if (data.discount_days !== undefined) payload.DiscountDays = data.discount_days;

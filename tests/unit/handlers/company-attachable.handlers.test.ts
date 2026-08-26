@@ -5,6 +5,15 @@ import { mockQuickbooksClient, mockQuickbooksClientClass, mockQuickBooksInstance
 jest.unstable_mockModule('../../../src/clients/quickbooks-client', () => ({
   quickbooksClient: mockQuickbooksClient,
   QuickbooksClient: mockQuickbooksClientClass,
+  resolveQboHandlerDependencies: () => ({
+    execution: { requestId: "test-request", issuer: "https://issuer.test", subjectId: "test-subject", oauthClientId: "test-client", organizationId: "test-org", qboConnectionId: "test-connection", scopes: new Set(["quickbooks.read", "quickbooks.write", "quickbooks.delete"]) },
+    qbo: mockQuickbooksClientClass.getInstance(),
+    rawQbo: mockQuickbooksClientClass.getAuthCredentials().then((credentials: any) => ({
+      accessToken: credentials.accessToken,
+      realmId: credentials.realmId,
+      environment: credentials.isSandbox ? "sandbox" : "production",
+    })),
+  }),
 }));
 
 // Mock https for binary upload tests
@@ -648,4 +657,3 @@ describe('Company and Attachable Handlers', () => {
     });
   });
 });
-

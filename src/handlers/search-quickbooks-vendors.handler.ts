@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -14,9 +15,9 @@ import { formatError } from "../helpers/format-error.js";
  * `fetchAll`, `count` can be supplied via the top‑level criteria object or as
  * dedicated entries in the array form.
  */
-export async function searchQuickbooksVendors(criteria: object | Array<Record<string, any>> = {}): Promise<ToolResponse<any[]>> {
+export async function searchQuickbooksVendors(criteria: object | Array<Record<string, any>> = {}, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any[]>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     return new Promise((resolve) => {
       (quickbooks as any).findVendors(criteria as any, (err: any, vendors: any) => {

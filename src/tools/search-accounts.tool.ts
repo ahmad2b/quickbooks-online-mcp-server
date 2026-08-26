@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { searchQuickbooksAccounts } from "../handlers/search-quickbooks-accounts.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -169,14 +170,14 @@ const criteriaSchema = z.any();
 const toolSchema = z.object({ criteria: criteriaSchema });
 
 // Tool handler with runtime validation & coercion
-const toolHandler = async ({ params }: any) => {
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
   const { criteria } = params;
   const parsed = RUNTIME_CRITERIA_SCHEMA.safeParse(criteria);
   if (!parsed.success) {
     return { content: [{ type: "text" as const, text: `Invalid criteria: ${parsed.error.message}` }] };
   }
   const normalized = normalizeAccountCriteria(criteria);
-  const response = await searchQuickbooksAccounts(normalized);
+  const response = await searchQuickbooksAccounts(normalized, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error searching accounts: ${response.error}` }] };
   }
@@ -194,5 +195,6 @@ export const SearchAccountsTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
 };

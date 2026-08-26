@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -7,9 +8,9 @@ export interface DeleteAttachableInput {
   sync_token: string;
 }
 
-export async function deleteQuickbooksAttachable(data: DeleteAttachableInput): Promise<ToolResponse<any>> {
+export async function deleteQuickbooksAttachable(data: DeleteAttachableInput, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
     const payload = { Id: data.id, SyncToken: data.sync_token };
 
     return new Promise((resolve) => {

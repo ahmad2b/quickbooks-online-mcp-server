@@ -1,4 +1,5 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
@@ -26,9 +27,9 @@ const DEFAULT_MAX_BYTES = 2 * 1024 * 1024; // 2 MiB remote-safe inline cap
  */
 export async function getQuickbooksInvoicePdf(
   invoiceId: string
-): Promise<ToolResponse<Buffer>> {
+, dependencies?: QboHandlerDependencies): Promise<ToolResponse<Buffer>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     return new Promise((resolve) => {
       (quickbooks as any).getInvoicePdf(invoiceId, (err: any, pdf: Buffer) => {

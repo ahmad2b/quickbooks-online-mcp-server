@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { createQuickbooksTerm } from "../handlers/create-quickbooks-term.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -15,10 +16,11 @@ const toolSchema = z.object({
   discount_day_of_month: z.number().optional().describe("Day of month for discount cutoff"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await createQuickbooksTerm(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await createQuickbooksTerm(params, dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: `Term created:` }, { type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
 
-export const CreateTermTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema, handler: toolHandler };
+export const CreateTermTool: ToolDefinition<typeof toolSchema> = { name: toolName, description: toolDescription, schema: toolSchema,
+  authority: "write",  handler: toolHandler };

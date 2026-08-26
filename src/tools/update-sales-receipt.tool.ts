@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { updateQuickbooksSalesReceipt } from "../handlers/update-quickbooks-sales-receipt.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -13,8 +14,8 @@ const toolSchema = z.object({
   doc_number: z.string().optional().describe("Document number"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await updateQuickbooksSalesReceipt(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await updateQuickbooksSalesReceipt(params, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error updating sales receipt: ${response.error}` }] };
   }
@@ -30,5 +31,6 @@ export const UpdateSalesReceiptTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "write",
   handler: toolHandler,
 };

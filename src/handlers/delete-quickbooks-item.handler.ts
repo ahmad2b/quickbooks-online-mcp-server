@@ -1,13 +1,14 @@
-import { QuickbooksClient } from "../clients/quickbooks-client.js";
+import { resolveQboHandlerDependencies } from "../clients/quickbooks-client.js";
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
 /**
  * Delete (make inactive) an item in QuickBooks Online
  */
-export async function deleteQuickbooksItem(idOrEntity: any): Promise<ToolResponse<any>> {
+export async function deleteQuickbooksItem(idOrEntity: any, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
-    const quickbooks = await QuickbooksClient.getInstance();
+    const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
 
     return new Promise((resolve) => {
       // Helper to fetch entity when only ID supplied

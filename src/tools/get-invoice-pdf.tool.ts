@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksInvoicePdf } from "../handlers/get-quickbooks-invoice-pdf.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -10,9 +11,9 @@ const toolSchema = z.object({
   invoice_id: z.string().min(1, { message: "Invoice ID is required" }),
 }).strict();
 
-const toolHandler = async ({ params }: { params: z.infer<typeof toolSchema> }) => {
+const toolHandler = async ({ params }: { params: z.infer<typeof toolSchema> }, _context?: unknown, dependencies?: QboHandlerDependencies) => {
   const { invoice_id } = params;
-  const response = await getQuickbooksInvoicePdf(invoice_id);
+  const response = await getQuickbooksInvoicePdf(invoice_id, dependencies);
   if (response.isError || !response.result) {
     return {
       isError: true,
@@ -32,5 +33,6 @@ export const GetInvoicePdfTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
 };

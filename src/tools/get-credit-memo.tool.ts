@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { getQuickbooksCreditMemo } from "../handlers/get-quickbooks-credit-memo.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -8,8 +9,8 @@ const toolSchema = z.object({
   id: z.string().min(1).describe("The QuickBooks Credit Memo ID"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await getQuickbooksCreditMemo(params.id);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksCreditMemo(params.id, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error getting credit memo: ${response.error}` }] };
   }
@@ -25,5 +26,6 @@ export const GetCreditMemoTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
 };

@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { createQuickbooksSalesReceipt } from "../handlers/create-quickbooks-sales-receipt.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -24,8 +25,8 @@ const toolSchema = z.object({
   global_tax_calculation: z.enum(["TaxExcluded", "TaxInclusive", "NotApplicable"]).optional().describe("Non-US companies only: whether unit prices exclude or include tax"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await createQuickbooksSalesReceipt(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await createQuickbooksSalesReceipt(params, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error creating sales receipt: ${response.error}` }] };
   }
@@ -41,5 +42,6 @@ export const CreateSalesReceiptTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "write",
   handler: toolHandler,
 };

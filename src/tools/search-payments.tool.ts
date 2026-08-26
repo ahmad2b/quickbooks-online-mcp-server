@@ -1,3 +1,4 @@
+import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { searchQuickbooksPayments } from "../handlers/search-quickbooks-payments.handler.js";
 import { ToolDefinition } from "../types/tool-definition.js";
 import { z } from "zod";
@@ -12,8 +13,8 @@ const toolSchema = z.object({
   limit: z.number().optional().describe("Maximum results to return"),
 });
 
-const toolHandler = async ({ params }: any) => {
-  const response = await searchQuickbooksPayments(params);
+const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await searchQuickbooksPayments(params, dependencies);
   if (response.isError) {
     return { content: [{ type: "text" as const, text: `Error searching payments: ${response.error}` }] };
   }
@@ -29,5 +30,6 @@ export const SearchPaymentsTool: ToolDefinition<typeof toolSchema> = {
   name: toolName,
   description: toolDescription,
   schema: toolSchema,
+  authority: "read",
   handler: toolHandler,
 };
