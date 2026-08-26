@@ -1,503 +1,122 @@
-# Architecture Documentation
+# Architecture
 
-This document explains the architecture, design decisions, and code patterns used in the QuickBooks Online MCP Server.
+The QuickBooks Online MCP Server is one stateless MCP `2026-07-28`
+Streamable HTTP resource. It is a resource server and execution data plane;
+it is not the organization database, OAuth token vault, or QuickBooks
+connection control plane.
 
-## Table of Contents
+## Request execution
 
-- [Overview](#overview)
-- [System Architecture](#system-architecture)
-- [Directory Structure](#directory-structure)
-- [Core Components](#core-components)
-- [Handler Pattern](#handler-pattern)
-- [Tool Registration](#tool-registration)
-- [Error Handling](#error-handling)
-- [Type System](#type-system)
-- [Design Decisions](#design-decisions)
-
----
-
-## Overview
-
-The QuickBooks Online MCP Server is a Model Context Protocol (MCP) server that exposes QuickBooks Online API functionality as tools that can be invoked by Claude Code and other MCP-compatible clients.
-
-### Key Metrics
-
-| Metric | Value |
-|--------|-------|
-| Total Tools | 142 |
-| Entity Types | 29 |
-| Financial Reports | 11 |
-| Handler Files | 87 |
-| Protocol | MCP `2026-07-28` only |
-
----
-
-## System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         MCP Client                               │
-│                    (Claude Code / IDE)                           │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                │ MCP 2026-07-28 Streamable HTTP over HTTPS
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         MCP Server                               │
-│                (src/index.ts + server factory)                   │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                    Tool Registry                         │    │
-│  │              (src/tools/*.tool.ts)                       │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                │                                 │
-│                                │ Tool Invocation                 │
-│                                ▼                                 │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                      Handlers                            │    │
-│  │            (src/handlers/*.handler.ts)                   │    │
-│  │                                                          │    │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │    │
-│  │  │    Create    │  │     Get      │  │    Update    │   │    │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘   │    │
-│  │  ┌──────────────┐  ┌──────────────┐                     │    │
-│  │  │    Delete    │  │    Search    │                     │    │
-│  │  └──────────────┘  └──────────────┘                     │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                │                                 │
-│                                │ API Calls                       │
-│                                ▼                                 │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │               QuickBooks Client                          │    │
-│  │           (src/clients/quickbooks-client.ts)             │    │
-│  │                                                          │    │
-│  │  • OAuth 2.0 Token Management                           │    │
-│  │  • Token Refresh                                         │    │
-│  │  • PostgreSQL distributed refresh lock                   │    │
-│  │  • Encrypted atomic token rotation                       │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                │ HTTPS
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   QuickBooks Online API                          │
-│               (sandbox.api.intuit.com / api.intuit.com)          │
-└─────────────────────────────────────────────────────────────────┘
+```text
+MCP client
+  │ HTTPS POST /mcp
+  ▼
+OAuth verifier ── exact resource/audience + issuer + expiry + scopes
+  ▼
+ClaimBindingAuthorizationPolicy
+  │ one immutable organization + opaque QBO connection context
+  ▼
+tool registry ── explicit authority + schema validation
+  │ read: lease now
+  │ mutation: ledger prepare → MRTR confirmation → atomic claim
+  ▼
+QboClientFactory ── one short-lived execution lease
+  │ fresh node-quickbooks client + bounded raw HTTP context
+  ▼
+QuickBooks Online
 ```
 
----
+Authorization, rate limiting, and mutation ledger checks happen before any
+connection-service lease request. A denied request or unconfirmed mutation
+makes zero QuickBooks calls. The lease is checked for connection identity,
+expiry safety margin, environment, and required fields before a client is
+constructed. The client and token references are released after every call.
 
-## Directory Structure
+## Ownership boundaries
 
-```
+DevRaftel infrastructure owns organizations, membership, connection selection,
+Intuit OAuth exchange, refresh-token storage/rotation, revocation, and
+reauthorization. It injects implementations of the provider ports in
+`src/runtime/contracts.ts`:
+
+- `QboExecutionLeaseProvider` returns a short-lived access token, realm,
+  environment, opaque connection ID, lease ID, credential version, and expiry;
+- `OperationLedger` durably protects mutation confirmation, idempotency, and
+  ambiguous outcomes;
+- `RateLimiter` provides atomic shared authenticated limits.
+
+The connection-service network protocol and workload-identity mechanism are
+deliberately not selected in this repository. The MCP process never receives
+or stores an Intuit refresh token or client secret and has no deployment-level
+default company.
+
+## Source layout
+
+```text
 src/
-├── index.ts                    # HTTP-only Node listener entry
-├── registry.ts                 # Deterministic 142-tool registry
-├── http-server.ts              # Stateless Streamable HTTP boundary
-├── http-config.ts              # Fail-closed HTTP/QBO configuration
-├── auth/                       # Provider-neutral token verifier and metadata loader
-├── runtime/                    # Ports, policy, encryption, PostgreSQL adapters
-│
-├── clients/
-│   └── quickbooks-client.ts    # QuickBooks API client wrapper
-│                               # - OAuth token management
-│                               # - Durable token refresh only; no browser/file flow
-│
-├── handlers/                   # Business logic layer (87 files)
-│   ├── create-quickbooks-*.ts  # Create operations (14 files)
-│   ├── get-quickbooks-*.ts     # Get/Read operations (25 files)
-│   ├── update-quickbooks-*.ts  # Update operations (14 files)
-│   ├── delete-quickbooks-*.ts  # Delete operations (14 files)
-│   └── search-quickbooks-*.ts  # Search operations (20 files)
-│
-├── tools/                      # MCP tool definitions
-│   └── *.tool.ts               # Zod schemas + tool metadata
-│
-├── helpers/
-│   └── format-error.ts         # Standardized error formatting
-│
-├── types/
-│   └── tool-response.ts        # Response type definitions
-│
-└── server/
-    └── *.ts                    # Server utilities
+├── index.ts                         # HTTP-only executable
+├── http-config.ts                   # fail-closed static configuration
+├── http-server.ts                   # OAuth + MCP + readiness boundary
+├── auth/                            # token verification and metadata
+├── runtime/
+│   ├── contracts.ts                 # provider ports and execution types
+│   ├── authorization-policy.ts     # claim shape and single-value checks
+│   ├── production-runtime.ts       # provider composition
+├── clients/quickbooks-client.ts    # request-scoped lease/client factory
+├── registry.ts                      # 142 explicit-authority definitions
+├── tools/                           # Zod schemas + dependency-forwarding adapters
+├── handlers/                        # QBO transformations and calls
+└── helpers/register-tool.ts         # authorization, MRTR, ledger orchestration
 ```
 
----
+## Execution context and handlers
 
-## Core Components
-
-### 1. MCP Server Entry Point (`src/index.ts`)
-
-The main server file starts the HTTP listener and delegates MCP protocol
-behavior to the strict-modern official handler and all tools to the shared
-registry/factory.
+`executionContextFromServerContext()` constructs a frozen context from
+verified `AuthInfo` claims and OAuth scopes. Handlers receive
+`QboHandlerDependencies` explicitly from the registered tool callback:
 
 ```typescript
-// Simplified structure
-createMcpHandler(factory, { legacy: 'reject', responseMode: 'json' });
+type QboHandlerDependencies = Readonly<{
+  execution: ExecutionContext;
+  qbo: QuickBooks;
+  rawQbo: QboRawClient;
+}>;
 ```
 
-### 2. QuickBooks Client (`src/clients/quickbooks-client.ts`)
-
-Wraps the `node-quickbooks` library and requires a durable connection store.
-The refresh path obtains a PostgreSQL transaction/advisory lock, rereads the
-latest tokens, and persists any rotation atomically before use.
-
-```typescript
-await connectionStore.withRefreshLock(connectionId, async (current, persist) => {
-  const refreshed = await intuit.refreshUsingToken(current.refreshToken);
-  await persist(refreshed); // atomic access + rotated refresh token
-});
-```
-
-### 3. Handlers (`src/handlers/*.handler.ts`)
-
-Each handler:
-- Defines a typed input interface
-- Authenticates with QuickBooks
-- Maps input to QuickBooks API format
-- Executes the API call
-- Returns standardized response
-
-### 4. Tools (`src/tools/*.tool.ts`)
-
-Define the MCP tool interface:
-- Tool name and description
-- Zod schema for input validation
-- Links to handler function
-
-### 5. Helpers (`src/helpers/format-error.ts`)
-
-Standardizes error messages:
-
-```typescript
-export function formatError(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  return JSON.stringify(error);
-}
-```
-
----
-
-## Handler Pattern
-
-All handlers follow a consistent pattern for maintainability:
-
-### Standard Handler Structure
-
-```typescript
-// 1. Imports
-import { quickbooksClient } from "../clients/quickbooks-client.js";
-import { ToolResponse } from "../types/tool-response.js";
-import { formatError } from "../helpers/format-error.js";
-
-// 2. Input Interface (typed, documented)
-export interface CreatePaymentInput {
-  customer_ref: string;              // Required: Customer ID
-  total_amt: number;                 // Required: Payment amount
-  payment_method_ref?: string;       // Optional: Payment method
-  txn_date?: string;                 // Optional: Transaction date (YYYY-MM-DD)
-  private_note?: string;             // Optional: Internal note
-}
-
-// 3. Handler Function
-export async function createQuickbooksPayment(
-  data: CreatePaymentInput
-): Promise<ToolResponse<any>> {
-  try {
-    // 3a. Authenticate
-    await quickbooksClient.authenticate();
-    const quickbooks = quickbooksClient.getQuickbooks();
-
-    // 3b. Build API payload with field mapping
-    const payload: any = {
-      CustomerRef: { value: data.customer_ref },
-      TotalAmt: data.total_amt,
-    };
-
-    // 3c. Add optional fields conditionally
-    if (data.payment_method_ref) {
-      payload.PaymentMethodRef = { value: data.payment_method_ref };
-    }
-    if (data.txn_date) payload.TxnDate = data.txn_date;
-    if (data.private_note) payload.PrivateNote = data.private_note;
-
-    // 3d. Execute API call with Promise wrapper
-    return new Promise((resolve) => {
-      (quickbooks as any).createPayment(payload, (err: any, result: any) => {
-        if (err) {
-          resolve({ result: null, isError: true, error: formatError(err) });
-        } else {
-          resolve({ result, isError: false, error: null });
-        }
-      });
-    });
-  } catch (error) {
-    // 3e. Handle authentication/setup errors
-    return { result: null, isError: true, error: formatError(error) };
-  }
-}
-```
-
-### Why This Pattern?
-
-1. **Type Safety**: TypeScript interfaces ensure compile-time validation
-2. **Consistency**: Same structure across 87 handlers makes codebase predictable
-3. **Error Handling**: Three-level error handling (auth, API, general)
-4. **Field Mapping**: Clean separation between snake_case inputs and PascalCase API
-
----
-
-## Tool Registration
-
-Tools are registered once by `src/server/qbo-mcp-server.ts` from the deterministic `src/registry.ts`. The central adapter exposes SDK v2 `registerTool()` while wrapping the existing handlers' `{ params }` input internally:
-
-```typescript
-// Tool registration connects:
-// 1. Tool name (MCP protocol identifier)
-// 2. Description (shown to users)
-// 3. Schema (Zod validation)
-// 4. Handler (business logic)
-
-server.registerTool(
-  'create_payment',
-  { description: 'Create a new customer payment in QuickBooks', inputSchema: paymentSchema, annotations: { destructiveHint: true, openWorldHint: true } },
-  async (args, context) => {
-    const result = await createQuickbooksPayment({ params: args }, context);
-    return {
-      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-    };
-  }
-);
-```
-
----
-
-## Error Handling
-
-### Three Layers of Error Handling
-
-```
-┌─────────────────────────────────────────────────┐
-│  Layer 1: Authentication Errors                  │
-│  • OAuth token expired                          │
-│  • Invalid credentials                          │
-│  • Network issues during auth                   │
-│  Handled by: try/catch in handler               │
-└─────────────────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────┐
-│  Layer 2: QuickBooks API Errors                  │
-│  • Validation errors (invalid data)             │
-│  • Not found errors                             │
-│  • Permission errors                            │
-│  Handled by: Callback err parameter             │
-└─────────────────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────┐
-│  Layer 3: General Errors                         │
-│  • Unexpected exceptions                        │
-│  • Serialization errors                         │
-│  Handled by: outer try/catch                    │
-└─────────────────────────────────────────────────┘
-```
-
-### Response Format
-
-All handlers return a consistent `ToolResponse<T>`:
-
-```typescript
-interface ToolResponse<T> {
-  result: T | null;      // Data on success, null on error
-  isError: boolean;      // Quick error check
-  error: string | null;  // Error message, null on success
-}
-
-// Success response
-{ result: { Id: '123', ... }, isError: false, error: null }
-
-// Error response
-{ result: null, isError: true, error: 'Customer not found' }
-```
-
----
-
-## Type System
-
-### Input Types
-
-Each handler defines its input interface:
-
-```typescript
-// Required fields have no optional modifier
-// Optional fields use TypeScript's optional property syntax
-
-export interface UpdateCompanyInfoInput {
-  id: string;                          // Required
-  sync_token: string;                  // Required
-  company_name?: string;               // Optional
-  company_addr?: {                     // Optional nested object
-    line1?: string;
-    city?: string;
-    country_sub_division_code?: string;
-    postal_code?: string;
-    country?: string;
-  };
-}
-```
-
-### Field Naming Conventions
-
-| Context | Convention | Example |
-|---------|------------|---------|
-| Handler inputs | snake_case | `customer_ref` |
-| QuickBooks API | PascalCase | `CustomerRef` |
-| Reference fields | Wrapped object | `{ value: 'id' }` |
-
----
-
-## Design Decisions
-
-### Why Separate Handlers and Tools?
-
-**Handlers** contain business logic:
-- Authentication
-- Data transformation
-- API interaction
-- Error handling
-
-**Tools** contain interface definition:
-- Schema validation
-- Description for users
-- Response formatting
-
-This separation allows:
-- Testing handlers in isolation
-- Reusing handlers across different tool registrations
-- Cleaner code organization
-
-### Why Callback-to-Promise Wrapping?
-
-The `node-quickbooks` library uses callback patterns:
-
-```typescript
-quickbooks.createPayment(payload, (err, result) => { ... });
-```
-
-We wrap these in Promises for:
-- Consistent async/await usage
-- Better error handling flow
-- Cleaner code structure
-
-### Why 100% Test Coverage?
-
-1. **Reliability**: Every code path is verified
-2. **Regression Prevention**: Changes must pass all tests
-3. **Documentation**: Tests show how handlers should behave
-4. **Confidence**: Refactoring is safe
-
-### Why ESM (ECMAScript Modules)?
-
-1. **Modern Standard**: ESM is the JavaScript module standard
-2. **Better Tree-Shaking**: Unused code can be eliminated
-3. **Top-Level Await**: Cleaner async initialization
-4. **Future-Proof**: Node.js is moving toward ESM
-
----
-
-## Data Flow Example
-
-**Creating a Payment:**
-
-```
-User Request
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│ MCP Client sends tool invocation                │
-│ { tool: 'create_payment', args: {...} }         │
-└─────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│ MCP Server receives request                      │
-│ - Validates args against Zod schema             │
-│ - Routes to createQuickbooksPayment handler     │
-└─────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│ Handler executes                                 │
-│ 1. quickbooksClient.authenticate()              │
-│ 2. Build payload (snake_case → PascalCase)      │
-│ 3. quickbooks.createPayment(payload, callback)  │
-└─────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│ QuickBooks API                                   │
-│ - Validates request                             │
-│ - Creates payment record                        │
-│ - Returns created entity                        │
-└─────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│ Handler processes response                       │
-│ - Wraps in ToolResponse                         │
-│ - Returns { result, isError, error }            │
-└─────────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│ MCP Server sends response                        │
-│ - Formats as MCP content                        │
-│ - Returns to client                             │
-└─────────────────────────────────────────────────┘
-    │
-    ▼
-User sees result
-```
-
----
-
-## Performance Considerations
-
-1. **Connection Reuse**: `quickbooksClient` maintains a singleton connection
-2. **Token Caching**: OAuth tokens are cached until expiry
-3. **Minimal Payloads**: Only requested fields are sent to API
-4. **No Polling**: Direct request/response pattern
-
----
-
-## Security
-
-1. **No Hardcoded Credentials**: All secrets via environment variables
-2. **OAuth 2.0**: Industry-standard authentication
-3. **Token Refresh**: Automatic token refresh on expiry
-4. **Sandbox Support**: Testing without production data
-5. **Input Validation**: Zod schemas validate all inputs
-
----
-
-## Extending the Server
-
-### Adding a New Entity Handler
-
-1. Create handler file: `src/handlers/create-quickbooks-newentity.handler.ts`
-2. Define input interface
-3. Implement handler function
-4. Add to mock in `tests/mocks/quickbooks.mock.ts`
-5. Register tool in `src/index.ts`
-6. Write tests with 100% coverage
-
-### Adding a New Report
-
-1. Create handler: `src/handlers/get-quickbooks-newreport.handler.ts`
-2. Check QuickBooks API for report parameters
-3. Implement with date range and filter support
-4. Register tool and write tests
+Handlers do not read request headers, decode tokens, select companies, accept
+realm IDs, or use tool-controlled credentials. Production registration always
+supplies the explicit third argument; a handler invoked without it fails closed.
+
+## Authority and scopes
+
+Every registry definition declares exactly one authority: `read`, `write`, or
+`delete`. Name prefixes remain only a consistency assertion and emergency
+registration kill-switch classification. `materializeToolDefinition()` fails
+closed when metadata is absent, unknown, or inconsistent. Public scopes remain
+coarse and compositional: all tools require `quickbooks.read`, writes add
+`quickbooks.write`, and deletes add `quickbooks.delete`.
+
+## Mutation safety
+
+The orchestration layer calculates a canonical keyed HMAC fingerprint and
+stores only metadata in the injected ledger. MRTR request state binds method,
+issuer, subject, client, organization, connection, tool, and fingerprint.
+`prepared → executing` is an atomic claim before dispatch. A dispatch that
+cannot be proven to have completed becomes `unknown`; it is never retried
+automatically. Raw financial input/output is not persisted.
+
+## Remote-safe files and errors
+
+Attachment and PDF tools process only bounded inline bytes. They reject server
+paths, arbitrary URL fetching, and overwrite controls. Error responses and
+operational logs omit provider bodies, credentials, internal URLs, stacks, and
+business payloads.
+
+## Operational consequences
+
+Moving tenancy and credentials to shared infrastructure removes the MCP
+single-company database/bootstrap path, but it does not make the first
+deployment simpler: a connection service, workload identity, durable ledger,
+shared limiter, AuthCo grant contract, and live sandbox validation become
+prerequisites. That trade-off is intentional because tenant ownership and
+long-lived credential custody belong outside the MCP execution process.

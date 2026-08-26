@@ -1,107 +1,94 @@
 # Production Streamable HTTP
 
-The server exposes only modern MCP `2026-07-28` at `POST /mcp`. It has no
-stdio serving path, initialization handshake, MCP session store, general GET
-event stream, or legacy HTTP+SSE fallback. `legacy: "reject"` is configured in
-the official TypeScript SDK v2 handler.
+The server exposes only MCP `2026-07-28` at `POST /mcp`. It rejects stdio,
+legacy protocol versions, the initialization lifecycle, HTTP+SSE, general GET
+event streams, and MCP session state. `legacy: "reject"` is configured in the
+official TypeScript SDK v2 handler.
 
-## Runtime model
+## Runtime ownership
 
-Application instances are disposable. Managed PostgreSQL is the durable
-authority for:
+DevRaftel control-plane infrastructure owns organizations, membership,
+connection selection, Intuit OAuth exchange, refresh-token storage and
+rotation, revocation, and reauthorization state. This MCP resource server
+verifies a resource-bound access token, extracts one configured organization
+claim and one opaque QuickBooks connection claim, and never accepts those
+values from headers or tool arguments.
 
-- encrypted QuickBooks access and refresh tokens;
-- distributed refresh locking and atomic rotation;
-- rate-limit buckets shared across instances;
-- mutation confirmation/audit states.
+After authorization, the runtime creates an immutable `ExecutionContext` and
+requests one short-lived execution lease from the injected
+`QboExecutionLeaseProvider`. The lease contains an access token, realm ID,
+environment, credential version, connection ID, expiry, and lease ID; it never
+contains a refresh token or client secret. The request-scoped
+`QboClientFactory` constructs a fresh `node-quickbooks` client and releases it
+after the call. No client, token, realm, or connection is process-global.
 
-Cold start validates schema and connection state but does not contact Intuit or
-rotate credentials. The Node entry binds a listener and supports graceful
-shutdown.
+The internal connection-service protocol is intentionally not defined here.
+Deployment supplies an authenticated adapter implementing the port in
+`src/runtime/contracts.ts`. The same boundary applies to the durable
+operation ledger and shared rate limiter.
 
-## Identity and authorization
+## Authorization and scopes
 
-The MCP authorization server and Intuit are separate trust domains. MCP bearer
-tokens are never forwarded to QuickBooks. The runtime has no AuthCo-specific
-defaults: issuer, metadata, verification endpoint, binding claim, and allowed
-binding values are environment configuration. AuthCo can be supplied as the
-initial deployment provider without coupling application code to it.
+Configure the exact MCP resource URI and OAuth issuer. Tokens must have that
+resource as audience, a subject and OAuth client identity, expiry/not-before,
+and exactly one non-empty value for each configured organization and
+connection claim. Claim names are provider-neutral configuration; the initial
+AuthCo deployment can provide namespaced DevRaftel claims.
 
-Token verification requires exact issuer, exact MCP resource audience,
-signature or authenticated introspection, expiry/not-before, a distinct
-subject, and an OAuth client identity. The configured binding claim maps that
-caller to this deployment's one QuickBooks company. Scopes then authorize
-actions:
+Every tool requires `quickbooks.read`. Write/update tools additionally require
+`quickbooks.write`; delete tools require `quickbooks.delete`. The tool registry
+requires explicit `read`, `write`, or `delete` authority metadata and direct
+`tools/call` authorization is enforced even if a tool is hidden from discovery.
 
-- `quickbooks.read`
-- `quickbooks.write`
-- `quickbooks.delete`
+## Mutation safety
 
-An authorization-server outage during introspection is treated as temporary
-service unavailability, not as proof that a valid token is invalid.
+Every mutation first returns MCP `input_required`. The request state is signed,
+expires after ten minutes, and binds method, issuer, subject, client,
+organization, connection, tool, and keyed input fingerprint. The durable
+operation ledger records only metadata and atomically claims
+`prepared → executing` before dispatch. Outcomes are `succeeded`, `failed`, or
+`unknown`; an ambiguous operation must be reconciled before retrying.
 
-## Financial mutation safety
+The input fingerprint is a keyed HMAC with an explicit key version. Raw input,
+output, credentials, and provider response bodies are not stored in ledger or
+rate-limit records. Ledger unavailability blocks mutations. A declined
+confirmation makes no lease or QuickBooks call.
 
-Every write/delete call first returns MCP `input_required` with a confirmation
-form. Its request state is HMAC protected, expires after ten minutes, and is
-bound to method, issuer, subject, and client. The server records an operation
-UUID plus canonical input hash before confirmation and atomically claims it
-before dispatch. Final states are `succeeded`, `failed`, or `unknown`.
+## Files and errors
 
-The database permits only one unresolved operation for the same company,
-caller, tool, and canonical input. On startup, expired unconfirmed records
-become `failed`; stale dispatched records become `unknown`, so instance loss
-cannot silently turn an uncertain QuickBooks commit into an automatic replay.
+Remote tools accept bounded inline attachment/PDF bytes only. They do not
+accept `file_path`, `output_path`, `overwrite`, or arbitrary server-side URL
+fetches. Inline attachments and PDFs are capped at 2 MiB; larger artifacts
+require a future private resource-link/object-store adapter.
 
-The application does not force-cancel a dispatched mutation when its HTTP
-timeout elapses: cancellation cannot roll back QuickBooks and would encourage
-an unsafe retry. An `unknown` outcome must be reconciled before retrying.
+Errors are redacted and contain no raw provider bodies, internal URLs, tokens,
+stack traces, or database details. Logs and traces contain metadata-only
+request identifiers and hashed principal identifiers.
 
-Reconciliation is an operator action in this release: inspect the QuickBooks
-company using the operation's tool and input hash, then conditionally update
-that operation from `unknown` to `succeeded` if it committed or `failed` if it
-did not. Do not clear unresolved rows merely to make a retry possible.
+## Configuration
 
-## Files and payloads
+Copy `.env.example`. Required values include:
 
-Remote tools do not accept server paths or arbitrary server-side URL fetches.
-The former `file_path`, `file_url`, `output_path`, and `overwrite` fields are
-absent from strict schemas. Small attachment/PDF payloads are capped at 2 MiB
-inline. Larger artifacts remain unavailable until a private object-store
-adapter is chosen; that future adapter should return MCP `resource_link`
-content instead of local paths or oversized JSON.
+- exact `MCP_RESOURCE_URI`, HTTPS host/origin allowlists, and MCP limits;
+- OAuth issuer, metadata URL, and either JWKS or authenticated introspection;
+- `MCP_AUTH_ORGANIZATION_CLAIM` and `MCP_AUTH_CONNECTION_CLAIM`;
+- independent 32-byte request-state and operation-fingerprint keys;
+- deployment-supplied lease, ledger, rate-limit, and workload-identity
+  adapter references.
 
-## Configuration and first provision
+The runtime must not be configured with `DATABASE_URL`, an MCP encryption key,
+deployment `QUICKBOOKS_CONNECTION_ID`, Intuit client credentials, a realm ID,
+or an Intuit refresh token. Provider implementations may use their own
+deployment configuration outside this repository.
 
-Copy `.env.example` and provide every required value. Generate independent
-32-byte base64 encryption/request-state keys. On the first deployment only,
-provide `QUICKBOOKS_ENVIRONMENT`, `QUICKBOOKS_REALM_ID`, and
-`QUICKBOOKS_REFRESH_TOKEN` together. Provisioning uses `INSERT ... ON CONFLICT
-DO NOTHING`, so an old environment token can never overwrite a rotated database
-token. Remove the bootstrap realm/token from deployment configuration after the
-row exists.
+## Deployment gates
 
-The service creates its three runtime tables when initializing, so the database
-role needs schema DDL permission for this version. A later controlled migration
-pipeline may move those statements out of application startup without changing
-the storage ports.
+Before customer traffic, verify build, lint, tests, MCP conformance, real
+AuthCo issuance/revocation, authenticated workload identity, at least two MCP
+replicas, a dedicated Intuit sandbox, concurrent lease acquisition, provider
+timeouts, worker loss during reads and mutations, and operation reconciliation.
 
-## Deployment boundary
-
-The application is a platform-neutral Node HTTP service. A deployment platform
-must preserve `/mcp` and the OAuth metadata routes, terminate public TLS, supply
-the required environment variables, and provide PostgreSQL connectivity. A
-coarse pre-auth rate limit belongs at the deployment edge; application rate
-limits start after token verification so they can key on authenticated identity.
-
-## Validation gates before production data
-
-1. `npm run build`, `npm test`, and `npm run lint` pass.
-2. The official MCP conformance suite passes against the deployed URL with
-   requirements `2026-07-28`.
-3. Auth tests cover correct audience, wrong audience, expiry, revocation,
-   insufficient scopes, and company-binding mismatch.
-4. A dedicated QuickBooks sandbox verifies refresh rotation across two
-   concurrent instances and after one instance is terminated.
-5. Read, confirmed mutation, declined mutation, and ambiguous mutation recovery
-   are tested before connecting production accounting data.
+Focused unit tests prove the in-process seam and handler transformations; they
+do not prove live provider authentication, multi-replica isolation, or
+QuickBooks sandbox behavior. AuthCo CIMD/client-resource authorization and the
+versioned connection-service contract remain external integration gates.

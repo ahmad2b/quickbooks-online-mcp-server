@@ -28,17 +28,18 @@ This document explains the testing strategy, patterns, and practices used in the
 | Handler/helper coverage | 100% for the existing covered surface |
 | Durable QuickBooks client | Lower path-specific floor documented in `jest.config.js` |
 
-After the configured authorization server has a dedicated test resource/client and the HTTPS service is
-running, execute the official frozen MCP requirement set as a deployment gate:
+After the configured authorization server has a dedicated test resource/client and the deployed HTTPS
+service is running, execute the official frozen MCP requirement set as a deployment gate:
 
 ```bash
 npx @modelcontextprotocol/conformance server \
-  --url https://localhost:8443/mcp \
+  --url https://mcp.example.com/mcp \
   --requirements 2026-07-28
 ```
 
-That official run is intentionally not represented as a local pass: it needs
-a reachable protected resource and working OAuth test configuration.
+Replace the example URL with the deployed MCP resource URI. That official run
+is intentionally not represented as a local pass: it needs a reachable
+protected resource and working OAuth test configuration.
 
 ### Test Framework Stack
 

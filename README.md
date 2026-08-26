@@ -34,8 +34,10 @@ are intentionally absent.
 - **Tested** - Jest test suite with ESM support
 
 Production requires a standards-compliant OAuth authorization server for MCP,
-an Intuit application/company connection, and PostgreSQL. MCP identity and
-Intuit credentials are separate trust domains.
+an AuthCo/control-plane grant for one organization and one opaque QuickBooks
+connection, and authenticated provider adapters for execution leases, the
+durable operation ledger, and shared rate limiting. The MCP process never owns
+Intuit refresh tokens, client secrets, or a default company.
 
 ---
 
@@ -57,9 +59,10 @@ npm run build
 
 ### Configuration
 
-Copy the template and supply the resource URL, authorization-server metadata,
-provider-neutral company-binding claim, PostgreSQL URL, independent encryption
-keys, and Intuit application credentials:
+Copy the template and supply the exact resource URL, authorization-server
+metadata, provider-neutral organization/connection claim names, independent
+request-state and operation-fingerprint keys, and deployment adapter
+references:
 
 ```bash
 cp .env.example .env
@@ -71,9 +74,11 @@ Generate both 32-byte keys independently with `openssl rand -base64 32`.
 ### Remote Streamable HTTP
 
 The executable always starts Streamable HTTP. Startup validates the exact HTTPS
-resource URI, explicit host/origin allowlists, OAuth metadata and verifier,
-caller-to-company binding, PostgreSQL schema/state, and encrypted QuickBooks
-connection. It never opens a browser or writes a token file.
+resource URI, explicit host/origin allowlists, OAuth metadata and verifier, and
+the provider-neutral runtime configuration. Provider adapters are injected by
+deployment; the MCP package does not define their internal network protocol.
+It never opens a browser, writes a token file, or falls back to a default
+company.
 
 ```env
 MCP_HOST=127.0.0.1
@@ -84,18 +89,21 @@ MCP_ALLOWED_ORIGINS=your-final-client.example
 MCP_AUTH_ISSUER=https://authorization-server.example/issuer
 MCP_AUTH_METADATA_URL=https://authorization-server.example/.well-known/oauth-authorization-server
 MCP_AUTH_JWKS_URL=https://authorization-server.example/jwks
-MCP_AUTH_BINDING_CLAIM=organization_id
-MCP_AUTH_ALLOWED_BINDING_VALUES=authorized-organization-id
-DATABASE_URL=postgresql://...
-MCP_DATA_ENCRYPTION_KEY=...
+MCP_AUTH_ORGANIZATION_CLAIM=https://devraftel.com/organization_id
+MCP_AUTH_CONNECTION_CLAIM=https://devraftel.com/qbo_connection_id
 MCP_REQUEST_STATE_KEY=...
-QUICKBOOKS_CONNECTION_ID=primary-company
+MCP_OPERATION_FINGERPRINT_KEY=...
+MCP_OPERATION_FINGERPRINT_KEY_VERSION=v1
+QBO_EXECUTION_LEASE_PROVIDER=devraftel-connection-service
+OPERATION_LEDGER_PROVIDER=devraftel-execution-ledger
+RATE_LIMIT_PROVIDER=devraftel-rate-limiter
+MCP_WORKLOAD_IDENTITY=quickbooks-mcp-production
 # Or use MCP_AUTH_INTROSPECTION_URL plus MCP_AUTH_INTROSPECTION_CLIENT_ID/SECRET.
 ```
 
 The configured authorization server protects this resource with
 `quickbooks.read`, `quickbooks.write`, and `quickbooks.delete`. AuthCo is the
-initial deployment choice, not a runtime dependency. See
+initial deployment choice, while claim names remain configurable. See
 [`docs/REMOTE-HTTP.md`](docs/REMOTE-HTTP.md) for durable state, confirmation,
 and deployment validation.
 
