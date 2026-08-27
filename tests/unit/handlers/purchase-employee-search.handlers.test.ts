@@ -6,7 +6,7 @@ jest.unstable_mockModule('../../../src/clients/quickbooks-client', () => ({
   quickbooksClient: mockQuickbooksClient,
   QuickbooksClient: mockQuickbooksClientClass,
   resolveQboHandlerDependencies: () => ({
-    execution: { requestId: "test-request", issuer: "https://issuer.test", subjectId: "test-subject", oauthClientId: "test-client", organizationId: "test-org", qboConnectionId: "test-connection", scopes: new Set(["quickbooks.read", "quickbooks.write", "quickbooks.delete"]) },
+    execution: { requestId: "test-request", issuer: "https://issuer.test", subjectId: "test-subject", oauthClientId: "test-client", organizationId: "test-org", scopes: new Set(["quickbooks.read", "quickbooks.write", "quickbooks.delete"]) },
     qbo: mockQuickbooksClientClass.getInstance(),
     rawQbo: { accessToken: "mock-access-token", realmId: "mock-realm-id", environment: "sandbox" },
   }),
@@ -115,5 +115,4 @@ describe('search_employees – Fixes #15', () => {
     expect(result.error).toContain('Auth failed');
   });
 });
-
 

@@ -22,13 +22,27 @@ function runtimeServices(): RuntimeServices {
         realmId: "test-realm",
         environment: "sandbox" as const,
       },
+      qboConnectionId: "test-connection",
       leaseId: "test-lease",
       expiresAt: new Date(Date.now() + 60_000),
       close: jest.fn(async () => undefined),
     })),
   } as unknown as RuntimeServices["qboClientFactory"];
+  const qboExecutionLeaseProvider = {
+    resolveConnectionBinding: jest.fn(async () => "test-connection"),
+    acquire: jest.fn(async () => ({
+      leaseId: "test-lease",
+      qboConnectionId: "test-connection",
+      accessToken: "test-access-token",
+      realmId: "test-realm",
+      environment: "sandbox" as const,
+      expiresAt: new Date(Date.now() + 60_000),
+      credentialVersion: "test-credential",
+    })),
+  } as unknown as RuntimeServices["qboExecutionLeaseProvider"];
   return {
     qboClientFactory,
+    qboExecutionLeaseProvider,
     rateLimiter: {} as RuntimeServices["rateLimiter"],
     authorizationPolicy: {
       authorize: jest.fn(() => ({
@@ -38,8 +52,6 @@ function runtimeServices(): RuntimeServices {
           subject: "user",
           clientId: "client",
           organizationId: "org",
-          qboConnectionId: "connection",
-          claims: {},
         },
       })),
     },
@@ -54,7 +66,7 @@ function runtimeServices(): RuntimeServices {
     },
     requestStateCodec: {
       mint: jest.fn(async () => "signed-state"),
-      verify: jest.fn(async () => ({ operationId: "op", toolName: "create_invoice", inputFingerprint: "hash" })),
+      verify: jest.fn(async () => ({ operationId: "op", toolName: "create_invoice", inputFingerprint: "hash", connectionId: "test-connection" })),
     },
     operationFingerprint: { key: new Uint8Array([1, 2, 3]), keyVersion: "test-v1" },
   };
@@ -121,7 +133,6 @@ describe("authority metadata", () => {
     expect(authorizeToolContext(definition, { http: { authInfo: { scopes: ["quickbooks.read"] } } }, services).allowed).toBe(false);
     expect(authorizeToolContext(definition, authContext(), services)).toMatchObject({ allowed: true, execution: {
       organizationId: "org",
-      qboConnectionId: "connection",
     } });
   });
 });
@@ -266,7 +277,7 @@ describe("RegisterTool", () => {
       { params: { id: "123" } },
       expect.anything(),
       expect.objectContaining({
-        execution: expect.objectContaining({ organizationId: "org", qboConnectionId: "connection" }),
+        execution: expect.objectContaining({ organizationId: "org" }),
         qbo: expect.anything(),
         rawQbo: expect.objectContaining({ realmId: "test-realm" }),
       }),
@@ -295,12 +306,13 @@ describe("RegisterTool", () => {
     expect(services.operationLedger.prepare).toHaveBeenCalledTimes(1);
     expect(mutationHandler).not.toHaveBeenCalled();
 
-    const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls[0][0] as { id: string; inputFingerprint: string };
+    const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls[0][0] as { id: string; inputFingerprint: string; connectionId: string };
     const retry = authContext() as any;
     retry.mcpReq.requestState = () => ({
       operationId: prepared.id,
       toolName: "create_invoice",
       inputFingerprint: prepared.inputFingerprint,
+      connectionId: prepared.connectionId,
     });
     retry.mcpReq.inputResponses = {
       confirm: { action: "accept", content: { confirm: true } },
@@ -313,6 +325,67 @@ describe("RegisterTool", () => {
       prepared.id,
       ["executing"],
       "succeeded",
+    );
+  });
+
+  it("rejects confirmation when the trusted QuickBooks connection changes", async () => {
+    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
+    const server = {
+      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
+        callback = registered;
+      }),
+    };
+    const services = runtimeServices();
+    const mutationHandler = jest.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    RegisterTool(server, {
+      name: "create_invoice",
+      description: "create",
+      schema,
+      handler: mutationHandler,
+      authority: "write",
+    }, services);
+
+    const first = await callback?.({ id: "123", amount: 10 }, authContext());
+    expect(first.resultType).toBe("input_required");
+    expect(services.qboExecutionLeaseProvider.resolveConnectionBinding).toHaveBeenCalledTimes(1);
+    expect(services.qboClientFactory.create).not.toHaveBeenCalled();
+
+    const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls[0][0] as {
+      id: string;
+      inputFingerprint: string;
+      connectionId: string;
+    };
+    const close = jest.fn(async () => undefined);
+    (services.qboClientFactory.create as any).mockResolvedValueOnce({
+      qbo: {},
+      rawQbo: { accessToken: "access", realmId: "realm", environment: "sandbox" },
+      qboConnectionId: "different-connection",
+      leaseId: "lease-different",
+      expiresAt: new Date(Date.now() + 60_000),
+      close,
+    });
+    const retry = authContext() as any;
+    retry.mcpReq.requestState = () => ({
+      operationId: prepared.id,
+      toolName: "create_invoice",
+      inputFingerprint: prepared.inputFingerprint,
+      connectionId: prepared.connectionId,
+    });
+    retry.mcpReq.inputResponses = {
+      confirm: { action: "accept", content: { confirm: true } },
+    };
+    const result = await callback?.({ id: "123", amount: 10 }, retry);
+
+    expect(result).toMatchObject({
+      isError: true,
+      _meta: { errorCode: "QBO_EXECUTION_LEASE_INVALID" },
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(mutationHandler).not.toHaveBeenCalled();
+    expect(services.operationLedger.transition).toHaveBeenCalledWith(
+      prepared.id,
+      ["executing"],
+      "failed",
     );
   });
 
@@ -380,7 +453,7 @@ describe("RegisterTool", () => {
     const services = runtimeServices();
     (services.authorizationPolicy.authorize as jest.Mock).mockReturnValueOnce({
       allowed: false,
-      reason: "missing_connection",
+      reason: "missing_organization",
     });
     RegisterTool(server, def("get_invoice"), services);
 
@@ -411,6 +484,7 @@ describe("RegisterTool", () => {
     (services.qboClientFactory.create as any).mockResolvedValueOnce({
       qbo: {},
       rawQbo: { accessToken: "access", realmId: "realm", environment: "sandbox" },
+      qboConnectionId: "test-connection",
       leaseId: "lease",
       expiresAt: new Date(Date.now() + 60_000),
       close,
@@ -511,12 +585,14 @@ describe("RegisterTool", () => {
     const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls.at(-1)?.[0] as {
       id: string;
       inputFingerprint: string;
+      connectionId: string;
     };
     const declinedContext = authContext() as any;
     declinedContext.mcpReq.requestState = () => ({
       operationId: prepared.id,
       toolName: "create_invoice",
       inputFingerprint: prepared.inputFingerprint,
+      connectionId: prepared.connectionId,
     });
     declinedContext.mcpReq.inputResponses = {
       confirm: { action: "decline", content: { confirm: false } },
@@ -538,8 +614,9 @@ describe("RegisterTool", () => {
     const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls.at(-1)?.[0] as {
       id: string;
       inputFingerprint: string;
+      connectionId: string;
     };
-    const state = { operationId: prepared.id, toolName: "create_invoice", inputFingerprint: prepared.inputFingerprint };
+    const state = { operationId: prepared.id, toolName: "create_invoice", inputFingerprint: prepared.inputFingerprint, connectionId: prepared.connectionId };
     const claimedContext = authContext() as any;
     claimedContext.mcpReq.requestState = () => state;
     claimedContext.mcpReq.inputResponses = {
@@ -573,12 +650,14 @@ describe("RegisterTool", () => {
     const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls.at(-1)?.[0] as {
       id: string;
       inputFingerprint: string;
+      connectionId: string;
     };
     const context = authContext() as any;
     context.mcpReq.requestState = () => ({
       operationId: prepared.id,
       toolName: "create_invoice",
       inputFingerprint: prepared.inputFingerprint,
+      connectionId: prepared.connectionId,
     });
     context.mcpReq.inputResponses = {
       confirm: { action: "accept", content: { confirm: true } },

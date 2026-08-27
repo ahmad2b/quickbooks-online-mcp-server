@@ -2,9 +2,11 @@
 
 The MCP runtime does not own an Intuit OAuth application, refresh tokens, or a
 default company. Those responsibilities belong to the DevRaftel connection
-service. Deployment code must inject a `QboExecutionLeaseProvider` and return a
-short-lived lease for the one opaque `qboConnectionId` in the verified request
-context.
+service. Deployment code must inject a `QboExecutionLeaseProvider`; it resolves
+the authorized QuickBooks connection from the verified caller and organization
+context and returns a short-lived lease. It must also expose
+`resolveConnectionBinding(context)`, which returns the opaque trusted connection
+identifier used to bind a mutation's confirmation to its later lease.
 
 The provider must never return a refresh token or client secret. See
 `src/runtime/contracts.ts` for the provider-neutral port and

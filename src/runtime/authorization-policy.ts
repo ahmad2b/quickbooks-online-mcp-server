@@ -7,7 +7,6 @@ import type {
 export type ClaimBindingPolicyOptions = {
   issuer: string;
   organizationClaim: string;
-  connectionClaim: string;
 };
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -17,25 +16,21 @@ function nonEmptyString(value: unknown): string | undefined {
 /**
  * Return one claim value only. Arrays are intentionally rejected, even when
  * they contain one item: an MCP access token represents exactly one
- * organization and one QuickBooks connection.
+ * organization.
  */
 function singleClaimValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 /**
- * Extracts the complete connection grant without coupling the resource server
- * to an authorization-vendor claim name. The control plane decides which
- * organization/connection is legal; this policy only verifies that the signed
- * token carries one well-formed value for each configured claim.
+ * Extracts the caller and organization binding without coupling the resource
+ * server to an authorization-vendor claim name. The connection service remains
+ * the authority for resolving a QuickBooks connection after this decision.
  */
 export class ClaimBindingAuthorizationPolicy implements AuthorizationPolicy {
   constructor(private readonly options: ClaimBindingPolicyOptions) {
-    if (!options.issuer.trim() || !options.organizationClaim.trim() || !options.connectionClaim.trim()) {
-      throw new Error("Issuer, organization, and connection claim names are required");
-    }
-    if (options.organizationClaim === options.connectionClaim) {
-      throw new Error("Organization and connection claims must be distinct");
+    if (!options.issuer.trim() || !options.organizationClaim.trim()) {
+      throw new Error("Issuer and organization claim names are required");
     }
   }
 
@@ -56,23 +51,11 @@ export class ClaimBindingAuthorizationPolicy implements AuthorizationPolicy {
       };
     }
 
-    const qboConnectionId = singleClaimValue(claims[this.options.connectionClaim]);
-    if (!qboConnectionId) {
-      return {
-        allowed: false,
-        reason: Array.isArray(claims[this.options.connectionClaim])
-          ? "ambiguous_connection"
-          : "missing_connection",
-      };
-    }
-
     const identity: CallerIdentity = {
       issuer,
       subject,
       clientId,
       organizationId,
-      qboConnectionId,
-      claims,
     };
     return { allowed: true, identity };
   }

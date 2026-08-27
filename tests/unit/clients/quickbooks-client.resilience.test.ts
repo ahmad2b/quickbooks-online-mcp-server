@@ -12,7 +12,6 @@ const context: ExecutionContext = Object.freeze({
   subjectId: "user-1",
   oauthClientId: "client-1",
   organizationId: "org-1",
-  qboConnectionId: "connection-1",
   scopes: new Set<"quickbooks.read">(["quickbooks.read"]),
 });
 
@@ -31,6 +30,8 @@ function lease(overrides: Partial<QboExecutionLease> = {}): QboExecutionLease {
 
 function provider(result: QboExecutionLease | Error): QboExecutionLeaseProvider {
   return {
+    resolveConnectionBinding: jest.fn(async () =>
+      result instanceof Error ? "connection-1" : result.qboConnectionId),
     acquire: jest.fn(async () => {
       if (result instanceof Error) throw result;
       return result;
@@ -64,9 +65,19 @@ describe("RequestScopedQboClientFactory", () => {
     await result.close();
   });
 
-  it("rejects a lease for another connection before constructing a client", async () => {
-    const factory = new RequestScopedQboClientFactory(provider(lease({ qboConnectionId: "connection-2" })));
-    await expect(factory.create(context)).rejects.toMatchObject({ code: "QBO_EXECUTION_LEASE_INVALID" });
+  it("uses the trusted provider lease connection without requiring a connection claim", async () => {
+    const acquire = jest.fn<QboExecutionLeaseProvider["acquire"]>(async (_context) =>
+      lease({ qboConnectionId: "connection-2" }));
+    const factory = new RequestScopedQboClientFactory({
+      resolveConnectionBinding: async () => "connection-2",
+      acquire,
+    });
+    await factory.create(context);
+    expect(acquire).toHaveBeenCalledWith(expect.objectContaining({
+      organizationId: "org-1",
+      subjectId: "user-1",
+    }));
+    expect(acquire.mock.calls[0]?.[0]).not.toHaveProperty("qboConnectionId");
   });
 
   it("rejects expired and near-expiry leases", async () => {
@@ -84,7 +95,11 @@ describe("RequestScopedQboClientFactory", () => {
 
   it("calls an optional provider release exactly once", async () => {
     const release = jest.fn(async () => undefined);
-    const leaseProvider: QboExecutionLeaseProvider = { acquire: async () => lease(), release };
+    const leaseProvider: QboExecutionLeaseProvider = {
+      resolveConnectionBinding: async () => "connection-1",
+      acquire: async () => lease(),
+      release,
+    };
     class FakeQuickBooks {}
     const factory = new RequestScopedQboClientFactory(leaseProvider, {
       QuickBooksConstructor: FakeQuickBooks as never,

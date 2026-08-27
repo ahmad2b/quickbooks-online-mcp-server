@@ -44,7 +44,6 @@ function validDate(value: unknown): value is Date {
 }
 
 function assertLease(
-  context: ExecutionContext,
   lease: QboExecutionLease,
   now: () => number,
   safetyMarginMs: number,
@@ -60,9 +59,6 @@ function assertLease(
       !isEnvironment(lease.environment) || !validDate(lease.expiresAt)) {
     throw new QboExecutionError("QBO_EXECUTION_LEASE_INVALID", "The execution lease is incomplete");
   }
-  if (lease.qboConnectionId !== context.qboConnectionId) {
-    throw new QboExecutionError("QBO_EXECUTION_LEASE_INVALID", "The execution lease does not match the requested connection");
-  }
   if (lease.expiresAt.getTime() <= now() + safetyMarginMs) {
     throw new QboExecutionError("QBO_EXECUTION_LEASE_INVALID", "The execution lease is expired or too close to expiry");
   }
@@ -70,8 +66,9 @@ function assertLease(
 
 /**
  * Constructs a fresh node-quickbooks and raw credential context for each
- * authorized request. The connection service supplies only a short-lived
- * access token; the MCP process has no refresh-token or client-secret input.
+ * authorized request. The connection service resolves the connection for the
+ * verified organization context and supplies only a short-lived access token;
+ * the MCP process has no refresh-token or client-secret input.
  */
 export class RequestScopedQboClientFactory implements QboClientFactory {
   private readonly QuickBooksConstructor: QuickBooksConstructor;
@@ -107,7 +104,7 @@ export class RequestScopedQboClientFactory implements QboClientFactory {
     }
 
     try {
-      assertLease(context, lease, this.now, this.safetyMarginMs);
+      assertLease(lease, this.now, this.safetyMarginMs);
       // node-quickbooks requires consumer key/secret constructor positions even
       // for bearer-token calls. Empty markers avoid introducing Intuit client
       // secrets into this data plane; refresh/exchange belongs to the broker.
@@ -131,6 +128,7 @@ export class RequestScopedQboClientFactory implements QboClientFactory {
       return {
         qbo,
         rawQbo,
+        qboConnectionId: lease.qboConnectionId,
         leaseId: lease.leaseId,
         expiresAt: lease.expiresAt,
         close: async () => {

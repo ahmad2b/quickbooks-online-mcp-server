@@ -188,7 +188,6 @@ export function executionContextFromServerContext(
     subjectId: identity.subject,
     oauthClientId: identity.clientId,
     organizationId: identity.organizationId,
-    qboConnectionId: identity.qboConnectionId,
     scopes,
   });
 }
@@ -244,12 +243,18 @@ function canonicalJson(value: unknown): string {
     .join(",")}}`;
 }
 
-function fingerprintInput(input: unknown, services: RuntimeServices): string {
+function fingerprintInput(
+  input: unknown,
+  connectionId: string,
+  services: RuntimeServices,
+): string {
   if (!services.operationFingerprint.key || services.operationFingerprint.key.length === 0) {
     throw new Error("Operation fingerprint key is not configured");
   }
   return crypto.createHmac("sha256", services.operationFingerprint.key)
-    .update(canonicalJson(input))
+    // Include the trusted connection binding so equivalent financial input for
+    // two connections never shares one ledger fingerprint.
+    .update(canonicalJson({ connectionId, input }))
     .digest("hex");
 }
 
@@ -292,10 +297,11 @@ function operationStateMatches(
   value: unknown,
   definition: RegisteredToolDefinition,
   inputFingerprint: string,
-): value is { operationId: string; toolName: string; inputFingerprint: string } {
+): value is { operationId: string; toolName: string; inputFingerprint: string; connectionId: string } {
   if (!value || typeof value !== "object") return false;
   const state = value as Record<string, unknown>;
   return typeof state.operationId === "string" && state.operationId.length > 0 &&
+    typeof state.connectionId === "string" && state.connectionId.length > 0 &&
     state.toolName === definition.name && state.inputFingerprint === inputFingerprint;
 }
 
@@ -305,14 +311,21 @@ async function executeWithLease(
   context: ServerContext,
   execution: ExecutionContext,
   services: RuntimeServices,
+  expectedConnectionId?: string,
 ): Promise<unknown> {
   const lease = await services.qboClientFactory.create(execution);
-  const dependencies: QboHandlerDependencies = Object.freeze({
-    execution,
-    qbo: lease.qbo,
-    rawQbo: lease.rawQbo,
-  });
   try {
+    if (expectedConnectionId !== undefined && lease.qboConnectionId !== expectedConnectionId) {
+      throw new QboExecutionError(
+        "QBO_EXECUTION_LEASE_INVALID",
+        "The execution lease does not match the confirmed QuickBooks connection",
+      );
+    }
+    const dependencies: QboHandlerDependencies = Object.freeze({
+      execution,
+      qbo: lease.qbo,
+      rawQbo: lease.rawQbo,
+    });
     return await definition.handler(
       { params: input as z.infer<typeof definition.schema> },
       context,
@@ -376,17 +389,45 @@ export function RegisterTool<T extends z.ZodType>(
         }
       }
 
-      let inputFingerprint: string;
-      try {
-        inputFingerprint = fingerprintInput(input, services!);
-      } catch {
-        return safeToolError("MCP_TOOL_NOT_AUTHORIZED", "Mutation safety is not configured.") as any;
-      }
       const priorState = serverContext.mcpReq.requestState<{
         operationId: string;
         toolName: string;
         inputFingerprint: string;
+        connectionId: string;
       }>();
+      if (!services!.operationFingerprint.key || services!.operationFingerprint.key.length === 0) {
+        return safeToolError("MCP_TOOL_NOT_AUTHORIZED", "Mutation safety is not configured.") as any;
+      }
+      let inputFingerprint: string;
+      let connectionId: string;
+      if (priorState) {
+        if (typeof priorState.connectionId !== "string" || priorState.connectionId.length === 0) {
+          return safeToolError("MCP_TOOL_NOT_AUTHORIZED", "The confirmation does not match this operation.") as any;
+        }
+        connectionId = priorState.connectionId;
+        try {
+          inputFingerprint = fingerprintInput(input, connectionId, services!);
+        } catch {
+          return safeToolError("MCP_TOOL_NOT_AUTHORIZED", "Mutation safety is not configured.") as any;
+        }
+      } else {
+        try {
+          connectionId = await services!.qboExecutionLeaseProvider.resolveConnectionBinding(execution);
+          if (typeof connectionId !== "string" || connectionId.length === 0) {
+            throw new QboExecutionError(
+              "QBO_EXECUTION_LEASE_INVALID",
+              "The QuickBooks connection binding is invalid",
+            );
+          }
+          inputFingerprint = fingerprintInput(input, connectionId, services!);
+        } catch (error) {
+          if (error instanceof QboExecutionError) return qboErrorResult(error) as any;
+          return safeToolError(
+            "QBO_EXECUTION_LEASE_UNAVAILABLE",
+            "The QuickBooks connection binding is unavailable.",
+          ) as any;
+        }
+      }
       if (!priorState) {
         const operationId = crypto.randomUUID();
         let prepared;
@@ -395,7 +436,7 @@ export function RegisterTool<T extends z.ZodType>(
             id: operationId,
             requestId: execution.requestId,
             organizationId: execution.organizationId,
-            connectionId: execution.qboConnectionId,
+            connectionId,
             principalId: principalId(execution, services!),
             toolName: definition.name,
             authority: definition.authority,
@@ -418,6 +459,7 @@ export function RegisterTool<T extends z.ZodType>(
             operationId,
             toolName: definition.name,
             inputFingerprint,
+            connectionId,
           }, serverContext);
         } catch {
           await services!.operationLedger.transition(operationId, ["prepared"], "failed").catch(() => undefined);
@@ -460,7 +502,7 @@ export function RegisterTool<T extends z.ZodType>(
 
       try {
         const result = normalizeToolResult(
-          await executeWithLease(definition, input, serverContext, execution, services!),
+          await executeWithLease(definition, input, serverContext, execution, services!, connectionId),
         );
         await services!.operationLedger.transition(
           priorState.operationId,
@@ -469,9 +511,12 @@ export function RegisterTool<T extends z.ZodType>(
         ).catch(() => undefined);
         return result as any;
       } catch (error) {
-        // Dispatch started; without a proven response the upstream commit is
-        // ambiguous and must be reconciled before any retry.
-        await services!.operationLedger.transition(priorState.operationId, ["executing"], "unknown").catch(() => undefined);
+        // A lease mismatch is rejected before handler dispatch and is safely
+        // failed; other post-claim errors have an ambiguous upstream outcome.
+        const outcome = error instanceof QboExecutionError && error.code === "QBO_EXECUTION_LEASE_INVALID"
+          ? "failed"
+          : "unknown";
+        await services!.operationLedger.transition(priorState.operationId, ["executing"], outcome).catch(() => undefined);
         if (error instanceof QboExecutionError) return qboErrorResult(error) as any;
         return safeToolError(
           "QBO_OPERATION_OUTCOME_UNKNOWN",

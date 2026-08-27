@@ -6,7 +6,7 @@ jest.unstable_mockModule('../../../src/clients/quickbooks-client', () => ({
   quickbooksClient: mockQuickbooksClient,
   QuickbooksClient: mockQuickbooksClientClass,
   resolveQboHandlerDependencies: () => ({
-    execution: { requestId: "test-request", issuer: "https://issuer.test", subjectId: "test-subject", oauthClientId: "test-client", organizationId: "test-org", qboConnectionId: "test-connection", scopes: new Set(["quickbooks.read", "quickbooks.write", "quickbooks.delete"]) },
+    execution: { requestId: "test-request", issuer: "https://issuer.test", subjectId: "test-subject", oauthClientId: "test-client", organizationId: "test-org", scopes: new Set(["quickbooks.read", "quickbooks.write", "quickbooks.delete"]) },
     qbo: mockQuickbooksClientClass.getInstance(),
     rawQbo: mockQuickbooksClientClass.getAuthCredentials().then((credentials: any) => ({
       accessToken: credentials.accessToken,
@@ -79,11 +79,15 @@ describe('Company and Attachable Handlers', () => {
       expect(result.result).toEqual(mockInfo);
     });
 
-    it('should get company info with specific ID', async () => {
+    it('should use the trusted connected company ID', async () => {
       const mockInfo = { Id: '2', CompanyName: 'Another Company' };
-      mockQuickBooksInstance.getCompanyInfo.mockImplementation((_id: any, cb: any) => cb(null, mockInfo));
+      mockQuickBooksInstance.getCompanyInfo.mockImplementation((id: any, cb: any) => {
+        expect(id).toBe('123456');
+        cb(null, mockInfo);
+      });
+      (mockQuickBooksInstance as any).realmId = '123456';
 
-      const result = await getQuickbooksCompanyInfo('specific-id');
+      const result = await getQuickbooksCompanyInfo();
 
       expect(result.isError).toBe(false);
     });

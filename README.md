@@ -34,9 +34,9 @@ are intentionally absent.
 - **Tested** - Jest test suite with ESM support
 
 Production requires a standards-compliant OAuth authorization server for MCP,
-an AuthCo/control-plane grant for one organization and one opaque QuickBooks
-connection, and authenticated provider adapters for execution leases, the
-durable operation ledger, and shared rate limiting. The MCP process never owns
+an AuthCo/control-plane grant for one organization, and authenticated provider
+adapters for execution leases, the durable operation ledger, and shared rate
+limiting. The MCP process never owns
 Intuit refresh tokens, client secrets, or a default company.
 
 ---
@@ -59,8 +59,8 @@ npm run build
 
 ### Configuration
 
-Copy the template and supply the exact resource URL, authorization-server
-metadata, provider-neutral organization/connection claim names, independent
+Copy the template and supply the exact QuickBooks MCP resource URL,
+authorization-server metadata, organization claim name, independent
 request-state and operation-fingerprint keys, and deployment adapter
 references:
 
@@ -83,14 +83,15 @@ company.
 ```env
 MCP_HOST=127.0.0.1
 MCP_PORT=3000
-MCP_RESOURCE_URI=https://your-final-host.example/mcp
-MCP_ALLOWED_HOSTS=your-final-host.example
+MCP_RESOURCE_URI=https://quickbooks-mcp.devraftel.com/mcp
+MCP_ALLOWED_HOSTS=quickbooks-mcp.devraftel.com
 MCP_ALLOWED_ORIGINS=your-final-client.example
 MCP_AUTH_ISSUER=https://authorization-server.example/issuer
 MCP_AUTH_METADATA_URL=https://authorization-server.example/.well-known/oauth-authorization-server
-MCP_AUTH_JWKS_URL=https://authorization-server.example/jwks
+MCP_AUTH_INTROSPECTION_URL=https://authorization-server.example/introspect
+MCP_AUTH_INTROSPECTION_CLIENT_ID=...
+MCP_AUTH_INTROSPECTION_CLIENT_SECRET=...
 MCP_AUTH_ORGANIZATION_CLAIM=https://devraftel.com/organization_id
-MCP_AUTH_CONNECTION_CLAIM=https://devraftel.com/qbo_connection_id
 MCP_REQUEST_STATE_KEY=...
 MCP_OPERATION_FINGERPRINT_KEY=...
 MCP_OPERATION_FINGERPRINT_KEY_VERSION=v1
@@ -98,18 +99,21 @@ QBO_EXECUTION_LEASE_PROVIDER=devraftel-connection-service
 OPERATION_LEDGER_PROVIDER=devraftel-execution-ledger
 RATE_LIMIT_PROVIDER=devraftel-rate-limiter
 MCP_WORKLOAD_IDENTITY=quickbooks-mcp-production
-# Or use MCP_AUTH_INTROSPECTION_URL plus MCP_AUTH_INTROSPECTION_CLIENT_ID/SECRET.
 ```
 
 The configured authorization server protects this resource with
 `quickbooks.read`, `quickbooks.write`, and `quickbooks.delete`. AuthCo is the
-initial deployment choice, while claim names remain configurable. See
+initial deployment choice. Every access token is introspected so live
+organization membership and revocation are enforced before execution. The
+trusted execution-lease provider resolves the
+organization's QuickBooks connection after authorization; no connection or
+company identifier is supplied by the client. See
 [`docs/REMOTE-HTTP.md`](docs/REMOTE-HTTP.md) for durable state, confirmation,
 and deployment validation.
 
 ### MCP client integration
 
-Configure the client with the public `https://your-host.example/mcp` URL. The
+Configure the client with the public `https://quickbooks-mcp.devraftel.com/mcp` URL. The
 client must implement MCP `2026-07-28` Streamable HTTP, OAuth discovery, and
 multi-round-trip `input_required` for confirmed write/delete calls.
 

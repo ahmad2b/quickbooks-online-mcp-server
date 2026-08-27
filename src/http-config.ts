@@ -10,10 +10,9 @@ export type HttpConfig = {
   resourceUri: URL;
   authIssuer: string;
   authMetadataUrl: URL;
-  authJwksUrl?: URL;
-  authIntrospectionUrl?: URL;
-  authIntrospectionClientId?: string;
-  authIntrospectionClientSecret?: string;
+  authIntrospectionUrl: URL;
+  authIntrospectionClientId: string;
+  authIntrospectionClientSecret: string;
   listenHost: string;
   listenPort: number;
   allowedHosts: string[];
@@ -25,7 +24,6 @@ export type HttpConfig = {
   operationFingerprintKey: string;
   operationFingerprintKeyVersion: string;
   authOrganizationClaim: string;
-  authConnectionClaim: string;
   /** Opaque adapter references; transport is selected by DevRaftel deployment. */
   qboExecutionLeaseProvider: string;
   operationLedgerProvider: string;
@@ -132,7 +130,12 @@ function parseResourceUri(env: NodeJS.ProcessEnv, errors: string[]): URL | undef
   if (!raw) return undefined;
   try {
     const uri = new URL(raw);
-    if (uri.protocol !== "https:" || uri.pathname !== MCP_PATH || uri.search || uri.hash) {
+    if (
+      uri.protocol !== "https:" ||
+      uri.pathname !== MCP_PATH ||
+      uri.search ||
+      uri.hash
+    ) {
       errors.push("MCP_RESOURCE_URI");
     }
     return uri;
@@ -152,10 +155,10 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
   const resourceUri = parseResourceUri(env, errors);
   const authIssuer = parseHttpsIssuer(env, errors);
   const authMetadataUrl = parseHttpsUrl(env, "MCP_AUTH_METADATA_URL", errors);
-  const authJwksUrl = parseHttpsUrl(env, "MCP_AUTH_JWKS_URL", errors, false);
-  const authIntrospectionUrl = parseHttpsUrl(env, "MCP_AUTH_INTROSPECTION_URL", errors, false);
-  if (!authJwksUrl && !authIntrospectionUrl) errors.push("MCP_AUTH_JWKS_URL|MCP_AUTH_INTROSPECTION_URL");
-  if (authJwksUrl && authIntrospectionUrl) errors.push("MCP_AUTH_JWKS_URL|MCP_AUTH_INTROSPECTION_URL");
+  const authIntrospectionUrl = parseHttpsUrl(env, "MCP_AUTH_INTROSPECTION_URL", errors);
+  if (env.MCP_AUTH_JWKS_URL?.trim()) errors.push("MCP_AUTH_JWKS_URL");
+  const authIntrospectionClientId = required(env, "MCP_AUTH_INTROSPECTION_CLIENT_ID", errors);
+  const authIntrospectionClientSecret = required(env, "MCP_AUTH_INTROSPECTION_CLIENT_SECRET", errors);
 
   const listenHost = env.MCP_HOST?.trim() || "127.0.0.1";
   const listenPort = parsePositiveInt(env, "MCP_PORT", 3000, errors);
@@ -171,29 +174,23 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     errors.push("MCP_OPERATION_FINGERPRINT_KEY_VERSION");
   }
   const authOrganizationClaim = required(env, "MCP_AUTH_ORGANIZATION_CLAIM", errors);
-  const authConnectionClaim = required(env, "MCP_AUTH_CONNECTION_CLAIM", errors);
-  if (authOrganizationClaim && authOrganizationClaim === authConnectionClaim) {
-    errors.push("MCP_AUTH_ORGANIZATION_CLAIM|MCP_AUTH_CONNECTION_CLAIM");
-  }
   const qboExecutionLeaseProvider = required(env, "QBO_EXECUTION_LEASE_PROVIDER", errors);
   const operationLedgerProvider = required(env, "OPERATION_LEDGER_PROVIDER", errors);
   const rateLimitProvider = required(env, "RATE_LIMIT_PROVIDER", errors);
   const workloadIdentity = required(env, "MCP_WORKLOAD_IDENTITY", errors);
   validateBase64Key(requestStateKey, "MCP_REQUEST_STATE_KEY", 32, errors);
   validateBase64Key(operationFingerprintKey, "MCP_OPERATION_FINGERPRINT_KEY", 32, errors);
-  if (authIntrospectionUrl && (!env.MCP_AUTH_INTROSPECTION_CLIENT_ID || !env.MCP_AUTH_INTROSPECTION_CLIENT_SECRET)) {
-    errors.push("MCP_AUTH_INTROSPECTION_CLIENT_ID|MCP_AUTH_INTROSPECTION_CLIENT_SECRET");
-  }
-
   if (
     errors.length > 0 ||
     !resourceUri ||
     !authIssuer ||
     !authMetadataUrl ||
+    !authIntrospectionUrl ||
+    !authIntrospectionClientId ||
+    !authIntrospectionClientSecret ||
     !requestStateKey ||
     !operationFingerprintKey ||
     !authOrganizationClaim ||
-    !authConnectionClaim ||
     !qboExecutionLeaseProvider ||
     !operationLedgerProvider ||
     !rateLimitProvider ||
@@ -206,10 +203,9 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     resourceUri,
     authIssuer,
     authMetadataUrl,
-    authJwksUrl,
     authIntrospectionUrl,
-    authIntrospectionClientId: env.MCP_AUTH_INTROSPECTION_CLIENT_ID?.trim(),
-    authIntrospectionClientSecret: env.MCP_AUTH_INTROSPECTION_CLIENT_SECRET?.trim(),
+    authIntrospectionClientId,
+    authIntrospectionClientSecret,
     listenHost,
     listenPort,
     allowedHosts,
@@ -221,7 +217,6 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     operationFingerprintKey,
     operationFingerprintKeyVersion,
     authOrganizationClaim,
-    authConnectionClaim,
     qboExecutionLeaseProvider,
     operationLedgerProvider,
     rateLimitProvider,

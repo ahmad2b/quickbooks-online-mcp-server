@@ -2,7 +2,7 @@
 
 ## Document metadata
 
-- Status: Proposed; implementation pending
+- Status: Locally implemented for the AuthCo/MCP contract; live integration pending
 - Date: 2026-08-26
 - Target protocol: MCP `2026-07-28`
 - Canonical protected resource: `https://quickbooks-mcp.devraftel.com/mcp`
@@ -25,7 +25,7 @@ The target is not a tenant database hidden inside the MCP server. The target is:
 ```text
 DevRaftel control plane owns the truth
                 ↓
-AuthCo issues a resource- and connection-bound grant
+AuthCo issues a resource- and organization-bound grant
                 ↓
 QuickBooks MCP verifies and enforces the grant
                 ↓
@@ -63,14 +63,15 @@ Its remaining single-tenant assumptions are:
 - the MCP database owning QuickBooks realm IDs and refresh tokens;
 - the MCP runtime owning Intuit refresh-token rotation;
 - an allow-list of organization claim values configured per deployment;
-- a mutation ledger whose connection identifier is taken from deployment configuration rather than a per-request signed grant.
+- a mutation ledger that must use caller and organization identity rather than
+  deployment-wide connection configuration.
 
 Adding multiple rows to the existing database would not, by itself, create a safe multi-tenant server. The security question is not whether the database can store several connections. It is whether every request has one unforgeable path:
 
 ```text
 validated MCP token
   → trusted organization
-  → trusted QuickBooks connection grant
+  → trusted QuickBooks connection lease
   → authorized tool
   → matching temporary Intuit access context
   → exactly one QuickBooks realm
@@ -91,9 +92,8 @@ AuthCo owns:
 - end-user authentication;
 - OAuth consent and client interoperability;
 - organization selection;
-- QuickBooks connection selection through a trusted control-plane lookup;
 - issuance of short-lived access tokens for the exact MCP resource;
-- signed caller, organization, client, scope, and connection-grant claims;
+- signed caller, organization, client, and scope claims;
 - token expiry and revocation behavior.
 
 #### DevRaftel control plane and connection service
@@ -143,7 +143,7 @@ QuickBooks MCP HTTP boundary
   │
   ├─ validate MCP protocol headers/body
   ├─ validate token issuer/audience/time/client/subject
-  ├─ read signed organization and connection grant
+  ├─ read the signed organization grant
   ├─ enforce quickbooks.read/write/delete scope
   └─ build immutable ExecutionContext
   │
@@ -161,7 +161,7 @@ QboExecutionLeaseProvider
   ▼
 DevRaftel connection service
   │
-  ├─ revalidate organization/connection/grant relationship
+  ├─ revalidate organization/connection relationship
   ├─ reject disabled or reauthorization-required connection
   ├─ refresh Intuit token under distributed lock when needed
   └─ return the minimum short-lived access context
@@ -179,14 +179,14 @@ Ephemeral result → sanitized MCP response
 ### Non-negotiable invariants
 
 1. No model-controlled tenant. Organization, connection, realm, and credentials must not be tool arguments.
-2. No deployment-default QuickBooks connection. A missing connection grant fails closed.
-3. One grant, one connection. A single MCP access token authorizes at most one QuickBooks connection.
+2. No deployment-default QuickBooks connection. A missing or invalid lease fails closed.
+3. One grant, one resolved connection. A single MCP execution resolves at most one QuickBooks connection through the trusted lease provider.
 4. No refresh token in the MCP runtime. The runtime must not receive, persist, rotate, log, or bootstrap Intuit refresh tokens.
 5. No Intuit client secret in the MCP runtime. Token refresh and OAuth exchange belong to the connection service.
 6. Request-scoped QuickBooks clients only. No mutable process-global realm, token, or QuickBooks SDK instance.
 7. Authorization before effects. A denied call makes zero connection-service lease calls and zero QuickBooks calls.
-8. Double enforcement. AuthCo signs the grant; the connection service revalidates ownership; the MCP runtime verifies and enforces the result.
-9. No credential fallback. Broker outage, invalid lease, token expiry, or connection mismatch must never fall back to environment credentials or another connection.
+8. Double enforcement. AuthCo signs the organization grant; the connection service resolves and revalidates ownership; the MCP runtime verifies the grant and enforces the lease result.
+9. No credential fallback. Broker outage, invalid lease, or token expiry must never fall back to environment credentials or another connection.
 10. Stateless protocol. No `Mcp-Session-Id`, sticky session, initialization handshake, or session-to-tenant mapping.
 11. Durable financial safety. Removing credential storage from MCP must not remove MRTR confirmation, operation idempotency, or ambiguous-outcome reconciliation.
 12. No persistent QuickBooks payloads. Business inputs and results may exist transiently in memory but must not be stored in logs, databases, caches, traces, or crash reports.
@@ -196,8 +196,8 @@ Ephemeral result → sanitized MCP response
 
 ## User Stories
 
-1. As a DevRaftel organization member, I want to authorize a compatible MCP client for one QuickBooks connection, so that the client cannot switch to another company without a new grant.
-2. As a user belonging to multiple organizations, I want AuthCo to require explicit organization and QuickBooks connection selection, so that an old active organization is not silently reused.
+1. As a DevRaftel organization member, I want to authorize a compatible MCP client for my organization, so that the trusted connection service resolves only an authorized QuickBooks connection.
+2. As a user belonging to multiple organizations, I want AuthCo to require explicit organization selection and the connection service to resolve the connection, so that an old active organization is not silently reused.
 3. As an organization administrator, I want connection access to be controlled by DevRaftel, so that revoking a connection or membership stops future MCP execution.
 4. As an MCP client, I want standard OAuth protected-resource discovery, so that I can connect without DevRaftel-specific client code.
 5. As an MCP client, I want tokens scoped to read, write, or delete authority, so that I can request the minimum necessary access.
@@ -205,7 +205,7 @@ Ephemeral result → sanitized MCP response
 7. As a finance operator, I want ambiguous mutation outcomes recorded durably, so that a network or worker failure does not cause a blind duplicate retry.
 8. As a platform operator, I want the MCP workload to hold only short-lived Intuit access tokens, so that compromising one worker does not expose long-lived refresh authority.
 9. As a platform operator, I want every QBO client constructed per request, so that concurrent tenants cannot share mutable credentials.
-10. As a security reviewer, I want tenant and connection identifiers derived only from verified claims and trusted services, so that headers and tool arguments cannot cross tenant boundaries.
+10. As a security reviewer, I want the organization identifier derived only from a verified claim and the connection resolved only by a trusted service, so that headers and tool arguments cannot cross tenant boundaries.
 11. As a security reviewer, I want every denied request to make zero downstream calls, so that authorization is demonstrably before execution.
 12. As a privacy reviewer, I want QuickBooks business payloads processed ephemerally, so that the MCP layer does not become a shadow accounting database.
 13. As an incident responder, I want global write/update/delete kill switches, so that risky categories can be disabled without changing tenant grants.
@@ -214,7 +214,7 @@ Ephemeral result → sanitized MCP response
 16. As a developer, I want QuickBooks business handlers to receive explicit execution dependencies, so that tenant isolation is visible and testable.
 17. As a developer, I want the existing QuickBooks transformations and schemas preserved, so that the tenancy migration does not unnecessarily rewrite business behavior.
 18. As a connection owner, I want a stable reauthorization error when Intuit revokes access, so that I am routed back to DevRaftel rather than a local OAuth server.
-19. As an auditor, I want an opaque operation record tied to organization, connection, principal, tool, and a keyed input fingerprint, so that financial execution can be reconciled without retaining the financial payload.
+19. As an auditor, I want an opaque operation record tied to organization, trusted connection, principal, tool, and a keyed input fingerprint, so that financial execution can be reconciled without retaining the financial payload.
 20. As a client user, I want remote-safe attachment and PDF behavior, so that server filesystem paths are never mistaken for my local files.
 
 ## Implementation Decisions
@@ -248,7 +248,7 @@ https://quickbooks-mcp.devraftel.com/mcp
 
 AuthCo authorization and token requests must receive this exact value through the OAuth `resource` parameter. The MCP server must reject tokens issued for the domain root, another DevRaftel API, an HTTP URL, or another path.
 
-### 3. Use a signed, connection-bound AuthCo grant
+### 3. Use a signed, organization-bound AuthCo grant
 
 Every accepted access token must provide these semantics:
 
@@ -259,20 +259,20 @@ OAuth client identity
 audience/resource
 scope
 organization identifier
-opaque QuickBooks connection identifier
 expiry/not-before
 ```
 
-Recommended namespaced custom claims are:
+The AuthCo organization claim is:
 
 ```text
 https://devraftel.com/organization_id
-https://devraftel.com/qbo_connection_id
 ```
 
-The exact claim names remain deployment configuration in the MCP package so the resource server stays authorization-vendor neutral. The initial AuthCo deployment supplies the namespaced DevRaftel values.
-
-The connection claim contains an opaque DevRaftel identifier, not an Intuit realm ID. It must be selected through trusted AuthCo/control-plane interaction during consent. Query parameters, client metadata, browser form fields, or model arguments are never trusted directly; AuthCo must validate the selected connection against the authenticated user's current organization membership and control-plane authority before signing it.
+AuthCo validates the organization grant. The MCP runtime receives no
+connection claim; the trusted Finance-owned lease provider resolves one
+authorized opaque QuickBooks connection after token verification. Query
+parameters, client metadata, browser form fields, or model arguments are never
+trusted for connection selection.
 
 ### 4. Keep public OAuth scopes intentionally coarse
 
@@ -303,7 +303,6 @@ type ExecutionContext = Readonly<{
   subjectId: string;
   oauthClientId: string;
   organizationId: string;
-  qboConnectionId: string;
   scopes: ReadonlySet<
     "quickbooks.read" | "quickbooks.write" | "quickbooks.delete"
   >;
@@ -331,11 +330,17 @@ The target orchestration dependency semantics are:
 type ToolExecutionServices = Readonly<{
   execution: ExecutionContext;
   qboClientFactory: QboClientFactory;
+  qboExecutionLeaseProvider: QboExecutionLeaseProvider;
   operationLedger: OperationLedger;
 }>;
 ```
 
-The orchestration boundary performs authorization and, for mutations, confirmation/ledger claiming before it asks the client factory for a lease. Only then does it invoke the business handler with a request-scoped `qbo` and `rawQbo`. A denied call or a mutation awaiting confirmation acquires no lease.
+The orchestration boundary performs authorization and, for mutations, resolves
+one trusted opaque connection binding before confirmation, then performs
+confirmation/ledger claiming before it asks the client factory for a
+credential-bearing lease. Only then does it invoke the business handler with a
+request-scoped `qbo` and `rawQbo`. A denied call or a mutation awaiting
+confirmation makes no credential-bearing lease or QBO call.
 
 Explicit dependency injection is the final design. `AsyncLocalStorage` may be used only as a short-lived mechanical migration bridge if necessary; it must not remain the authoritative security boundary because ambient context makes dependency review and isolation tests weaker.
 
@@ -360,13 +365,17 @@ interface QboClientFactory {
 interface QboClientLease {
   qbo: QuickBooks;
   rawQbo: QboRawClient;
+  qboConnectionId: string;
   leaseId: string;
   expiresAt: Date;
   close(): Promise<void>;
 }
 ```
 
-The factory obtains one execution lease, verifies that its opaque connection identity matches the signed request context, verifies its expiry and environment, constructs the client, and releases all references after the tool call.
+The factory obtains one execution lease from the trusted provider, verifies its
+opaque connection identity, expiry, and environment, constructs the client,
+and releases all references after the tool call. The provider, not AuthCo's
+token claims, is the connection-selection authority.
 
 No QuickBooks SDK client is cached globally. A future cache requires a separate security review and must be keyed by connection ID, credential version, and environment with expiry before token expiration.
 
@@ -376,6 +385,7 @@ The MCP package defines a provider port:
 
 ```typescript
 interface QboExecutionLeaseProvider {
+  resolveConnectionBinding(context: ExecutionContext): Promise<string>;
   acquire(context: ExecutionContext): Promise<QboExecutionLease>;
 }
 
@@ -406,7 +416,7 @@ The connection service must:
 
 The MCP runtime must reject a lease when:
 
-- the returned connection ID differs from the signed connection claim;
+- the returned connection ID is missing or malformed;
 - the lease is expired or inside the configured safety margin;
 - the environment is invalid;
 - any required field is missing;
@@ -443,7 +453,12 @@ Moves entirely to the DevRaftel connection service. The MCP runtime no longer ow
 
 #### Rate limiting
 
-Coarse unauthenticated protection belongs at the edge. Authenticated limits should use trusted organization, client, connection, tool, and authority identifiers through a shared platform limiter. The MCP package consumes a limiter port; it does not own tenant policy or require a local database table.
+Coarse unauthenticated protection belongs at the edge. Authenticated limits
+should use trusted organization, client, tool, and authority identifiers
+through a shared platform limiter. The MCP package consumes a limiter port; it
+does not own tenant policy or require a local database table. If a future
+limiter needs connection partitioning, it must use trusted lease output rather
+than token or model input.
 
 #### Mutation operation ledger
 
@@ -456,7 +471,7 @@ The operation record must contain only metadata required for safety:
 ```text
 operation ID
 organization ID or non-reversible organization reference
-opaque QuickBooks connection ID
+opaque trusted connection identifier resolved from the connection service
 non-reversible principal reference
 tool name
 authority class
@@ -475,10 +490,10 @@ Required behavior:
 
 - create the operation before requesting confirmation;
 - calculate the input fingerprint with a keyed HMAC over canonical input, not an unsalted hash, so low-entropy financial fields cannot be guessed through an offline dictionary attack;
-- bind MRTR request state to issuer, subject, client, organization, connection, method, tool, and input fingerprint;
+- bind MRTR request state to issuer, subject, client, organization, trusted connection, method, tool, and input fingerprint;
 - atomically claim `prepared → executing` before dispatch;
 - record `unknown` when execution began but commit outcome cannot be proven;
-- prevent equivalent unresolved operations for the same organization, connection, principal, tool, and input fingerprint;
+- prevent equivalent unresolved operations for the same organization, principal, tool, and input fingerprint;
 - require reconciliation before retrying an `unknown` operation;
 - never store raw input or output.
 
@@ -606,9 +621,10 @@ MCP_ALLOWED_HOSTS
 MCP_ALLOWED_ORIGINS
 MCP_AUTH_ISSUER
 MCP_AUTH_METADATA_URL
-MCP_AUTH_JWKS_URL or introspection configuration
+MCP_AUTH_INTROSPECTION_URL
+MCP_AUTH_INTROSPECTION_CLIENT_ID
+MCP_AUTH_INTROSPECTION_CLIENT_SECRET
 MCP_AUTH_ORGANIZATION_CLAIM
-MCP_AUTH_CONNECTION_CLAIM
 MCP_REQUEST_STATE_KEY or an injected request-state signer
 QBO_EXECUTION_LEASE_PROVIDER configuration
 OPERATION_LEDGER_PROVIDER configuration
@@ -627,13 +643,15 @@ For a QuickBooks grant, AuthCo must:
 1. authenticate the user;
 2. validate current organization membership;
 3. require organization selection when more than one is available;
-4. retrieve authorized QuickBooks connections from a trusted control-plane interface;
-5. require selection of exactly one connection;
-6. revalidate that selection server-side;
-7. bind the organization and opaque connection identifier into the authorization grant;
-8. issue an access token whose audience is the exact MCP resource;
-9. include only approved QuickBooks scopes;
-10. support revocation and short access-token lifetime.
+4. issue an access token containing only the approved organization claim and
+   whose audience is the exact MCP resource;
+5. include only approved QuickBooks scopes; and
+6. support revocation and short access-token lifetime.
+
+Finance's connection service owns connection selection and revalidation. The
+MCP lease provider resolves that connection from the verified caller and
+organization context after authorization; AuthCo does not issue a connection,
+realm, company, or credential claim.
 
 OAuth client interoperability remains vendor neutral. AuthCo's CIMD support is used for compatible public clients; explicitly pre-registered clients may be supported where a client lacks CIMD. No single hard-coded MCP client may be used as evidence of universal interoperability.
 
@@ -655,7 +673,11 @@ The contract must define:
 - service availability target;
 - behavior during revocation races.
 
-If the connection service uses a persisted authorization-grant record for real-time revocation, AuthCo must include an opaque signed grant identifier or token identifier that the service can resolve. The MCP client never supplies or interprets that identifier; it is carried only in the verified token context.
+The connection service must enforce real-time revocation through its authenticated
+Finance-side authorization state and the AuthCo verification/introspection
+result. This MCP contract does not define or require a separate grant
+identifier, connection claim, or other AuthCo token claim for that lookup; the
+MCP client never supplies connection-selection or revocation state.
 
 Transport choice such as internal HTTPS, mTLS, or cloud-native RPC is intentionally not selected in this repository. The MCP package depends on the port, while the deployment supplies one reviewed adapter.
 
@@ -673,8 +695,10 @@ Exit gate: current single-connection behavior is reproducibly green.
 #### Phase 1 — Build control-plane prerequisites
 
 - Add the QuickBooks MCP resource and scopes to AuthCo.
-- Implement trusted organization and connection selection.
-- Add the signed organization and connection claims.
+- Implement trusted organization selection and connection resolution in the
+  Finance-owned connection service.
+- Add the signed organization claim only; the MCP runtime receives no
+  connection, realm, company, or credential claim.
 - Build the connection-service execution-lease contract and adapter.
 - Move Intuit onboarding, refresh-token storage, rotation, and reauthorization status to that service.
 - Provide workload authentication.
@@ -684,16 +708,19 @@ Exit gate: a test principal can obtain a resource-bound AuthCo token and the MCP
 
 #### Phase 2 — Introduce request execution context
 
-- Parse the configured organization and connection claims after token verification.
+- Parse the configured organization claim after token verification.
 - Build the immutable execution context once.
-- Reject missing, malformed, multiple, or mismatched connection grants.
-- Bind MRTR request state to organization and connection.
+- Reject missing or malformed organization grants.
+- Bind MRTR request state to the verified caller, organization, and trusted
+  connection for mutation confirmation.
 
 Exit gate: forged headers, arguments, and wrong-audience tokens cannot affect context and cause zero downstream calls.
 
 #### Phase 3 — Introduce execution-lease and client-factory ports
 
 - Add the provider interfaces.
+- Add the trusted pre-confirmation connection-binding lookup for mutations and
+  require the acquired confirmation lease to match it.
 - Validate lease identity, expiry, environment, and response authenticity.
 - Construct request-scoped SDK and raw HTTP clients.
 - Ensure disposal after success, failure, timeout, and cancellation.
@@ -800,11 +827,17 @@ The execution-lease adapter must have consumer-driven contract tests covering:
 
 1. Tenant A and Tenant B execute concurrently and each QBO request receives only its expected realm/token.
 2. A valid token for another DevRaftel resource returns `401` and causes zero lease/QBO calls.
-3. A token missing organization or connection claim fails closed.
+3. A token missing or containing an ambiguous organization claim fails closed;
+   a connection claim is neither required nor trusted.
 4. A forged `X-Tenant-ID`, `X-Realm-ID`, or `X-QBO-Connection-ID` cannot affect execution.
 5. Tool arguments containing tenant, connection, realm, access token, or refresh token are rejected as unsupported.
-6. A signed organization A plus connection B mismatch is rejected by the connection service and produces zero QBO calls.
-7. A lease response for a different connection is rejected by MCP even if the service call succeeded.
+6. The lease provider revalidates organization ownership and returns one
+   authorized trusted connection; a missing or malformed lease produces zero
+   QBO calls.
+7. The trusted lease connection remains bound through client construction and
+   execution; model input cannot replace it. If the provider's connection
+   changes between mutation preparation and confirmation, the operation fails
+   before QBO dispatch.
 8. A read-only token cannot execute write or delete tools.
 9. A hidden tool invoked directly is still authorized and denied independently.
 10. Broker outage fails closed with no default credential path.
@@ -815,7 +848,8 @@ The execution-lease adapter must have consumer-driven contract tests covering:
 
 ### Mandatory mutation cases
 
-1. A mutation first returns MRTR `input_required` and makes zero lease or QBO calls.
+1. A mutation may perform one trusted opaque connection-binding lookup, then
+   returns MRTR `input_required` without credential-bearing lease or QBO calls.
 2. Confirmation is bound to caller, client, organization, connection, tool, method, and keyed input fingerprint.
 3. Reusing confirmation state under another organization or connection fails.
 4. Declined confirmation transitions the operation to `failed` and makes zero QBO calls.
@@ -882,9 +916,12 @@ The migration is complete only when all statements below are evidenced:
 
 - The public endpoint serves only MCP `2026-07-28` over HTTPS.
 - Every request validates an access token for the exact MCP resource.
-- Every request has one signed organization and one opaque QuickBooks connection grant.
+- Every request has one verified organization grant; the lease provider resolves
+  the opaque QuickBooks connection after authorization and binds it across any
+  mutation confirmation round trip.
 - The model/client cannot select organization, connection, realm, environment, or credentials through tool input or untrusted headers.
-- AuthCo and the connection service both validate the organization/connection relationship.
+- The connection service validates the organization/connection relationship
+  before returning a lease.
 - The MCP runtime contains no Intuit refresh token or Intuit client secret.
 - The MCP runtime does not own QuickBooks connection/token storage or refresh rotation.
 - No process-global QuickBooks client, realm, or access token exists.
@@ -892,7 +929,8 @@ The migration is complete only when all statements below are evidenced:
 - Denied calls create zero lease requests and zero QuickBooks calls.
 - Every tool has explicit authority metadata and direct calls are enforced.
 - MRTR confirmation and durable ambiguous-outcome protection remain intact.
-- Operation state is tenant- and connection-bound without retaining payloads.
+- Operation state is caller-, organization-, and trusted-connection-bound without
+  retaining payloads.
 - Logs, traces, errors, and storage contain no QuickBooks business payload or credentials.
 - Remote file tools cannot access server paths or arbitrary URLs.
 - Connection-service and ledger calls authenticate the MCP workload.
@@ -930,7 +968,7 @@ This architecture simplifies the MCP workload after the DevRaftel platform depen
 
 It does not make the first end-to-end deployment smaller. It moves security-critical complexity into shared infrastructure that must be deployed and operated first:
 
-- AuthCo organization- and connection-bound grants;
+- AuthCo organization-bound grants;
 - a QuickBooks connection/token service and durable credential store;
 - workload identity between MCP and internal services;
 - an execution-ledger provider;
@@ -988,4 +1026,4 @@ It also adds a dependency on the connection service. That service becomes securi
 
 ### Final principle
 
-> DevRaftel owns multi-tenancy. AuthCo expresses one authorized connection grant. The connection service owns long-lived QuickBooks credentials. The MCP runtime independently verifies the grant, executes exactly one authorized operation with a temporary access context, preserves financial safety, and forgets the business payload.
+> DevRaftel owns multi-tenancy. AuthCo expresses one authorized organization grant. The connection service owns connection selection and long-lived QuickBooks credentials. The MCP runtime independently verifies the grant, executes exactly one authorized operation with a temporary access context, preserves financial safety, and forgets the business payload.

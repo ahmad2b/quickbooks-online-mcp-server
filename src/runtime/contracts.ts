@@ -10,9 +10,9 @@ export type QuickBooksScope =
   | "quickbooks.delete";
 
 /**
- * The only tenant/connection context a business handler may receive. It is
- * assembled once from verified authorization claims and never from request
- * headers or tool input.
+ * The only caller context a business handler may receive. It is assembled once
+ * from verified authorization claims and never from request headers or tool
+ * input. A connection is resolved separately by QboExecutionLeaseProvider.
  */
 export type ExecutionContext = Readonly<{
   requestId: string;
@@ -20,11 +20,10 @@ export type ExecutionContext = Readonly<{
   subjectId: string;
   oauthClientId: string;
   organizationId: string;
-  qboConnectionId: string;
   scopes: ReadonlySet<QuickBooksScope>;
 }>;
 
-/** Short-lived connection-service material; refresh tokens never cross this port. */
+/** Short-lived trusted connection-service material; refresh tokens never cross this port. */
 export type QboExecutionLease = Readonly<{
   leaseId: string;
   qboConnectionId: string;
@@ -35,8 +34,14 @@ export type QboExecutionLease = Readonly<{
   credentialVersion: string;
 }>;
 
-/** Provider port; transport and workload authentication live outside MCP. */
+/**
+ * Provider port; transport and workload authentication live outside MCP. The
+ * provider resolves the authorized connection from the caller context and
+ * returns it only in the trusted, short-lived lease.
+ */
 export interface QboExecutionLeaseProvider {
+  /** Resolve the trusted connection binding before a mutation is confirmed. */
+  resolveConnectionBinding(context: ExecutionContext): Promise<string>;
   acquire(context: ExecutionContext): Promise<QboExecutionLease>;
   release?(lease: QboExecutionLease, context: ExecutionContext): Promise<void>;
 }
@@ -52,6 +57,8 @@ export type QboRawClient = Readonly<{
 export interface QboClientLease {
   readonly qbo: QuickBooks;
   readonly rawQbo: QboRawClient;
+  /** Trusted connection binding returned by the lease provider. */
+  readonly qboConnectionId: string;
   readonly leaseId: string;
   readonly expiresAt: Date;
   close(): Promise<void>;
@@ -83,8 +90,6 @@ export type CallerIdentity = {
   subject: string;
   clientId: string;
   organizationId: string;
-  qboConnectionId: string;
-  claims: Readonly<Record<string, unknown>>;
 };
 
 export type AuthorizationDecision =
@@ -94,12 +99,10 @@ export type AuthorizationDecision =
       reason:
         | "missing_identity"
         | "missing_organization"
-        | "missing_connection"
-        | "ambiguous_organization"
-        | "ambiguous_connection";
+        | "ambiguous_organization";
     };
 
-/** Provider-neutral connection-grant policy. OAuth scopes are checked separately. */
+/** Provider-neutral caller/organization policy. OAuth scopes are checked separately. */
 export interface AuthorizationPolicy {
   authorize(claims: Readonly<Record<string, unknown>>): AuthorizationDecision;
 }
@@ -136,11 +139,13 @@ export type MutationRequestState = {
   operationId: string;
   toolName: string;
   inputFingerprint: string;
+  connectionId: string;
 };
 
 /** All execution dependencies are injected; no deployment-level company exists. */
 export type RuntimeServices = {
   qboClientFactory: QboClientFactory;
+  qboExecutionLeaseProvider: QboExecutionLeaseProvider;
   rateLimiter: RateLimiter;
   authorizationPolicy: AuthorizationPolicy;
   operationLedger: OperationLedger;

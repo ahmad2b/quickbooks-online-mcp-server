@@ -10,9 +10,10 @@ official TypeScript SDK v2 handler.
 DevRaftel control-plane infrastructure owns organizations, membership,
 connection selection, Intuit OAuth exchange, refresh-token storage and
 rotation, revocation, and reauthorization state. This MCP resource server
-verifies a resource-bound access token, extracts one configured organization
-claim and one opaque QuickBooks connection claim, and never accepts those
-values from headers or tool arguments.
+verifies a resource-bound access token and extracts one configured organization
+claim. The trusted lease provider resolves the QuickBooks connection after
+authorization; the server never accepts connection, company, realm, or
+credential values from headers or tool arguments.
 
 After authorization, the runtime creates an immutable `ExecutionContext` and
 requests one short-lived execution lease from the injected
@@ -31,9 +32,8 @@ operation ledger and shared rate limiter.
 
 Configure the exact MCP resource URI and OAuth issuer. Tokens must have that
 resource as audience, a subject and OAuth client identity, expiry/not-before,
-and exactly one non-empty value for each configured organization and
-connection claim. Claim names are provider-neutral configuration; the initial
-AuthCo deployment can provide namespaced DevRaftel claims.
+and exactly one non-empty organization claim. AuthCo provides the namespaced
+DevRaftel organization claim.
 
 Every tool requires `quickbooks.read`. Write/update tools additionally require
 `quickbooks.write`; delete tools require `quickbooks.delete`. The tool registry
@@ -42,17 +42,23 @@ requires explicit `read`, `write`, or `delete` authority metadata and direct
 
 ## Mutation safety
 
-Every mutation first returns MCP `input_required`. The request state is signed,
-expires after ten minutes, and binds method, issuer, subject, client,
-organization, connection, tool, and keyed input fingerprint. The durable
+Every mutation first performs a trusted opaque connection-binding lookup and
+returns MCP `input_required`; it does not acquire credential-bearing lease
+material or call QuickBooks. The request state is signed, expires after ten
+minutes, and binds method, issuer, subject, client, organization, connection,
+tool, and a keyed input fingerprint. The durable
 operation ledger records only metadata and atomically claims
 `prepared → executing` before dispatch. Outcomes are `succeeded`, `failed`, or
 `unknown`; an ambiguous operation must be reconciled before retrying.
 
+After confirmation, the execution lease must contain the same trusted
+connection binding recorded in the request state and ledger. A changed or
+malformed binding fails before the handler or QuickBooks client is dispatched.
+
 The input fingerprint is a keyed HMAC with an explicit key version. Raw input,
 output, credentials, and provider response bodies are not stored in ledger or
 rate-limit records. Ledger unavailability blocks mutations. A declined
-confirmation makes no lease or QuickBooks call.
+confirmation makes no credential-bearing lease or QuickBooks call.
 
 ## Files and errors
 
@@ -70,8 +76,9 @@ request identifiers and hashed principal identifiers.
 Copy `.env.example`. Required values include:
 
 - exact `MCP_RESOURCE_URI`, HTTPS host/origin allowlists, and MCP limits;
-- OAuth issuer, metadata URL, and either JWKS or authenticated introspection;
-- `MCP_AUTH_ORGANIZATION_CLAIM` and `MCP_AUTH_CONNECTION_CLAIM`;
+- OAuth issuer, metadata URL, and authenticated introspection credentials;
+- `MCP_AUTH_ORGANIZATION_CLAIM` (the AuthCo value is
+  `https://devraftel.com/organization_id`);
 - independent 32-byte request-state and operation-fingerprint keys;
 - deployment-supplied lease, ledger, rate-limit, and workload-identity
   adapter references.

@@ -280,7 +280,6 @@ function makeRateLimitMiddleware(
         identity.identity.subject,
         identity.identity.clientId,
         identity.identity.organizationId,
-        identity.identity.qboConnectionId,
       ]
         .map((value) => stableIdentifier(typeof value === "string" ? value : undefined))
         .join(":");
@@ -303,7 +302,7 @@ function makeRateLimitMiddleware(
   };
 }
 
-function makeCompanyBindingMiddleware(config: HttpConfig, services: RuntimeServices) {
+function makeOrganizationBindingMiddleware(config: HttpConfig, services: RuntimeServices) {
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(config.resourceUri);
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const authInfo = req.auth;
@@ -433,8 +432,7 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
   const tokenVerifier = options.tokenVerifier ?? new OAuthAccessTokenVerifier({
     issuer: options.config.authIssuer,
     resourceUri: options.config.resourceUri.toString(),
-    jwksUrl: options.config.authJwksUrl?.toString(),
-    introspectionUrl: options.config.authIntrospectionUrl?.toString(),
+    introspectionUrl: options.config.authIntrospectionUrl.toString(),
     introspectionClientId: options.config.authIntrospectionClientId,
     introspectionClientSecret: options.config.authIntrospectionClientSecret,
   });
@@ -484,7 +482,7 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.config.resourceUri),
   });
   const scope = makeScopeMiddleware(options.config, toolAuthority);
-  const companyBinding = makeCompanyBindingMiddleware(options.config, options.services);
+  const organizationBinding = makeOrganizationBindingMiddleware(options.config, options.services);
   const executionInput = makeExecutionInputMiddleware();
   const rateLimit = makeRateLimitMiddleware(options.config, now, toolAuthority, options.services);
   const nodeHandler = toNodeHandler(handler, {
@@ -521,7 +519,7 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
       state.inFlight = Math.max(0, state.inFlight - 1);
     });
     next();
-  }, bearer, companyBinding, executionInput, rateLimit, scope, async (req: Request, res: Response, next: NextFunction) => {
+  }, bearer, organizationBinding, executionInput, rateLimit, scope, async (req: Request, res: Response, next: NextFunction) => {
     try {
       await nodeHandler(req, res, req.body);
     } catch (error) {
@@ -586,8 +584,7 @@ export async function startHttpServer(
   const tokenVerifier = options.tokenVerifier ?? new OAuthAccessTokenVerifier({
     issuer: config.authIssuer,
     resourceUri: config.resourceUri.toString(),
-    jwksUrl: config.authJwksUrl?.toString(),
-    introspectionUrl: config.authIntrospectionUrl?.toString(),
+    introspectionUrl: config.authIntrospectionUrl.toString(),
     introspectionClientId: config.authIntrospectionClientId,
     introspectionClientSecret: config.authIntrospectionClientSecret,
     fetchImpl: options.fetchImpl,

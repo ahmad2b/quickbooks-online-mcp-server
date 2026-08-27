@@ -32,6 +32,10 @@ function claimsFromContext(context: ServerContext): Readonly<Record<string, unkn
     : {};
 }
 
+function scopesFromContext(context: ServerContext): string {
+  return [...(context.http?.authInfo?.scopes ?? [])].sort().join(" ");
+}
+
 /**
  * Compose the MCP runtime only from provider adapters supplied by DevRaftel
  * infrastructure. This repository intentionally does not select an internal
@@ -46,6 +50,9 @@ export async function createProductionRuntime(
       "MCP runtime providers are not configured; inject a connection-lease provider, operation ledger, rate limiter, and QBO client factory",
     );
   }
+  if (typeof adapters.qboExecutionLeaseProvider.resolveConnectionBinding !== "function") {
+    throw new Error("MCP runtime connection provider does not expose a trusted binding resolver");
+  }
   try {
     await adapters.checkReadiness();
   } catch {
@@ -55,7 +62,6 @@ export async function createProductionRuntime(
   const authorizationPolicy = new ClaimBindingAuthorizationPolicy({
     issuer: config.authIssuer,
     organizationClaim: config.authOrganizationClaim,
-    connectionClaim: config.authConnectionClaim,
   });
   const requestStateCodec = createRequestStateCodec<MutationRequestState>({
     key: Buffer.from(config.requestStateKey, "base64"),
@@ -67,7 +73,7 @@ export async function createProductionRuntime(
         claims.sub,
         claims.client_id ?? claims.azp,
         claims[config.authOrganizationClaim],
-        claims[config.authConnectionClaim],
+        scopesFromContext(context),
         context.mcpReq.method,
       ]
         .map((value) => typeof value === "string" ? value : "")
@@ -80,6 +86,7 @@ export async function createProductionRuntime(
       qboClientFactory: adapters.qboClientFactory ?? new RequestScopedQboClientFactory(
         adapters.qboExecutionLeaseProvider,
       ),
+      qboExecutionLeaseProvider: adapters.qboExecutionLeaseProvider,
       rateLimiter: adapters.rateLimiter,
       authorizationPolicy,
       operationLedger: adapters.operationLedger,

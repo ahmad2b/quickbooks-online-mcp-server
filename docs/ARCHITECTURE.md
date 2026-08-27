@@ -14,11 +14,11 @@ MCP client
 OAuth verifier ── exact resource/audience + issuer + expiry + scopes
   ▼
 ClaimBindingAuthorizationPolicy
-  │ one immutable organization + opaque QBO connection context
+  │ one immutable caller + organization context
   ▼
 tool registry ── explicit authority + schema validation
-  │ read: lease now
-  │ mutation: ledger prepare → MRTR confirmation → atomic claim
+  │ read: trusted lease now
+  │ mutation: trusted binding → ledger prepare → MRTR confirmation → atomic claim
   ▼
 QboClientFactory ── one short-lived execution lease
   │ fresh node-quickbooks client + bounded raw HTTP context
@@ -27,10 +27,12 @@ QuickBooks Online
 ```
 
 Authorization, rate limiting, and mutation ledger checks happen before any
-connection-service lease request. A denied request or unconfirmed mutation
-makes zero QuickBooks calls. The lease is checked for connection identity,
-expiry safety margin, environment, and required fields before a client is
-constructed. The client and token references are released after every call.
+credential-bearing connection-service lease request. A mutation may perform a
+trusted connection-binding lookup before confirmation, but a denied request or
+unconfirmed mutation makes zero QuickBooks or credential-bearing lease calls.
+The trusted lease is checked for connection identity, expiry safety margin,
+environment, and required fields before a client is constructed. The client
+and token references are released after every call.
 
 ## Ownership boundaries
 
@@ -39,7 +41,8 @@ Intuit OAuth exchange, refresh-token storage/rotation, revocation, and
 reauthorization. It injects implementations of the provider ports in
 `src/runtime/contracts.ts`:
 
-- `QboExecutionLeaseProvider` returns a short-lived access token, realm,
+- `QboExecutionLeaseProvider` resolves the authorized connection from the
+  caller/organization context and returns a short-lived access token, realm,
   environment, opaque connection ID, lease ID, credential version, and expiry;
 - `OperationLedger` durably protects mutation confirmation, idempotency, and
   ambiguous outcomes;
@@ -71,8 +74,11 @@ src/
 
 ## Execution context and handlers
 
-`executionContextFromServerContext()` constructs a frozen context from
-verified `AuthInfo` claims and OAuth scopes. Handlers receive
+`executionContextFromServerContext()` constructs a frozen caller/organization
+context from verified `AuthInfo` claims and OAuth scopes. The lease provider
+resolves connection data only after authorization. Mutation preparation may
+resolve an opaque binding before confirmation; credential material is still
+withheld until an accepted confirmation. Handlers receive
 `QboHandlerDependencies` explicitly from the registered tool callback:
 
 ```typescript
@@ -98,9 +104,11 @@ coarse and compositional: all tools require `quickbooks.read`, writes add
 
 ## Mutation safety
 
-The orchestration layer calculates a canonical keyed HMAC fingerprint and
-stores only metadata in the injected ledger. MRTR request state binds method,
-issuer, subject, client, organization, connection, tool, and fingerprint.
+The orchestration layer resolves an opaque trusted connection binding, includes
+it in the canonical keyed HMAC fingerprint, and stores only metadata in the
+injected ledger. MRTR request state binds method, issuer, subject, client,
+organization, connection, tool, and fingerprint. On confirmation, the acquired
+lease must carry the same trusted connection binding before dispatch.
 `prepared → executing` is an atomic claim before dispatch. A dispatch that
 cannot be proven to have completed becomes `unknown`; it is never retried
 automatically. Raw financial input/output is not persisted.

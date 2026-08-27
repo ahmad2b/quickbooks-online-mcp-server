@@ -27,7 +27,6 @@
         "@modelcontextprotocol/node": "2.0.0",
         "@modelcontextprotocol/server": "2.0.0",
         "express": "5.1.0",
-        "jose": "^6.2.10",
         "node-quickbooks": "^2.0.43",
         "zod": "^4.2.0"
     },
