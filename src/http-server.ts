@@ -90,6 +90,21 @@ export type HttpServerHandle = HttpApp & {
   close: () => Promise<void>;
 };
 
+export type PreparedHttpApp = HttpApp & {
+  close: () => Promise<void>;
+};
+
+export type ProductionHttpAppOptions = Partial<
+  Omit<HttpAppOptions, "config" | "oauthMetadata" | "tokenVerifier" | "services">
+> & {
+  config?: HttpConfig;
+  oauthMetadata?: OAuthMetadata;
+  tokenVerifier?: OAuthTokenVerifier;
+  fetchImpl?: typeof fetch;
+  services?: RuntimeServices;
+  runtimeAdapters?: RuntimeProviderAdapters;
+};
+
 function stableIdentifier(value: string | undefined): string {
   if (!value) return "anonymous";
   return crypto.createHash("sha256").update(value).digest("hex").slice(0, 16);
@@ -562,20 +577,14 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
 }
 
 /**
- * Validate configuration, fetch authorization-server metadata, verify injected
- * provider readiness, and only then bind the HTTP listener. HTTP mode sets the
- * non-interactive marker before any QuickBooks request can be dispatched.
+ * Build the production Express application without binding a port. Hosting
+ * platforms such as Vercel own the listener and can call this initializer once
+ * per warm function instance. Provider readiness still completes before the
+ * application is marked ready or any QuickBooks tool can run.
  */
-export async function startHttpServer(
-  options: Partial<Omit<HttpAppOptions, "config" | "oauthMetadata" | "tokenVerifier" | "services">> & {
-    config?: HttpConfig;
-    oauthMetadata?: OAuthMetadata;
-    tokenVerifier?: OAuthTokenVerifier;
-    fetchImpl?: typeof fetch;
-    services?: RuntimeServices;
-    runtimeAdapters?: RuntimeProviderAdapters;
-  } = {},
-): Promise<HttpServerHandle> {
+export async function prepareHttpApp(
+  options: ProductionHttpAppOptions = {},
+): Promise<PreparedHttpApp> {
   process.env.QUICKBOOKS_NON_INTERACTIVE = "true";
   const config = options.config ?? loadHttpConfig();
   const oauthMetadata = options.oauthMetadata ?? await loadOAuthMetadata(config, {
@@ -625,6 +634,30 @@ export async function startHttpServer(
     await ownedRuntime?.close().catch(() => undefined);
     throw error;
   }
+  let closed = false;
+  const close = async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    appState.beginShutdown();
+    try {
+      await appState.closeHandler();
+    } finally {
+      await ownedRuntime?.close();
+    }
+  };
+  return { ...appState, close };
+}
+
+/**
+ * Prepare the application and bind the standalone Node listener. Vercel uses
+ * prepareHttpApp() through the root server.ts entrypoint instead.
+ */
+export async function startHttpServer(
+  options: ProductionHttpAppOptions = {},
+): Promise<HttpServerHandle> {
+  const prepared = await prepareHttpApp(options);
+  const { close: closePreparedApp, ...appState } = prepared;
+  const config = appState.config;
   const server = http.createServer(appState.app);
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS;
   let closed = false;
@@ -651,20 +684,13 @@ export async function startHttpServer(
       server.closeIdleConnections();
     });
     try {
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(resolve, remainingShutdownMs());
-        appState.closeHandler().then(
-          () => { clearTimeout(timeout); resolve(); },
-          (error) => { clearTimeout(timeout); reject(error); },
-        );
-      });
+      await Promise.race([
+        closePreparedApp(),
+        new Promise<void>((resolve) => setTimeout(resolve, remainingShutdownMs())),
+      ]);
     } finally {
-      try {
-        await ownedRuntime?.close();
-      } finally {
-        process.removeListener("SIGINT", shutdown);
-        process.removeListener("SIGTERM", shutdown);
-      }
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
     }
   };
   const shutdown = () => {
@@ -693,14 +719,10 @@ export async function startHttpServer(
     });
   } catch (error) {
     try {
-      await appState.closeHandler();
+      await closePreparedApp();
     } finally {
-      try {
-        await ownedRuntime?.close();
-      } finally {
-        process.removeListener("SIGINT", shutdown);
-        process.removeListener("SIGTERM", shutdown);
-      }
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
     }
     throw error;
   }
