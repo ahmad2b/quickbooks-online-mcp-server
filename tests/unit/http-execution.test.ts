@@ -319,6 +319,7 @@ describe("authenticated HTTP execution seam", () => {
     const response = runExecutionInputGuard(callBody("get_probe", "42", {
       id: "42",
       tenant_id: "organization-tenant-b",
+      company_id: "company-tenant-b",
       realm_id: "realm-tenant-b",
       access_token: "attacker-token",
     }));

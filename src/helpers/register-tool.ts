@@ -53,6 +53,9 @@ const FORBIDDEN_EXECUTION_KEYS = new Set([
   "connectionid",
   "qboconnection",
   "qboconnectionid",
+  "company",
+  "companyid",
+  "companyidentifier",
   "realm",
   "realmid",
   "environment",
@@ -66,7 +69,7 @@ const FORBIDDEN_EXECUTION_KEYS = new Set([
 ]);
 
 export const FORBIDDEN_EXECUTION_INPUT_MESSAGE =
-  "Organization, connection, realm, environment, credential, and server-file fields are not accepted as tool input.";
+  "Organization, company, connection, realm, environment, credential, and server-file fields are not accepted as tool input.";
 
 export function getCrudCategory(toolName: string): CrudCategory {
   for (const [prefix, category] of Object.entries(PREFIX_CATEGORY_MAP)) {

@@ -3,10 +3,10 @@ import type { QboHandlerDependencies } from "../runtime/contracts.js";
 import { ToolResponse } from "../types/tool-response.js";
 import { formatError } from "../helpers/format-error.js";
 
-export async function getQuickbooksCompanyInfo(companyId?: string, dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
+export async function getQuickbooksCompanyInfo(dependencies?: QboHandlerDependencies): Promise<ToolResponse<any>> {
   try {
     const quickbooks = await resolveQboHandlerDependencies(dependencies).qbo;
-    const id = companyId || (quickbooks as any).realmId;
+    const id = (quickbooks as any).realmId;
 
     return new Promise((resolve) => {
       (quickbooks as any).getCompanyInfo(id, (err: any, info: any) => {

@@ -5,12 +5,10 @@ import { z } from "zod";
 
 const toolName = "get_company_info";
 const toolDescription = "Retrieve the company information from QuickBooks Online.";
-const toolSchema = z.object({
-  company_id: z.string().optional().describe("Company ID (uses connected company if not specified)"),
-});
+const toolSchema = z.object({});
 
-const toolHandler = async ({ params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
-  const response = await getQuickbooksCompanyInfo(params.company_id, dependencies);
+const toolHandler = async ({ params: _params }: any, _context?: unknown, dependencies?: QboHandlerDependencies) => {
+  const response = await getQuickbooksCompanyInfo(dependencies);
   if (response.isError) return { content: [{ type: "text" as const, text: `Error: ${response.error}` }] };
   return { content: [{ type: "text" as const, text: JSON.stringify(response.result, null, 2) }] };
 };
