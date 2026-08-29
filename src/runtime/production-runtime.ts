@@ -1,6 +1,7 @@
 import { createRequestStateCodec, type ServerContext } from "@modelcontextprotocol/server";
 import { ClaimBindingAuthorizationPolicy } from "./authorization-policy.js";
 import { RequestScopedQboClientFactory } from "../clients/quickbooks-client.js";
+import { companyIdFromServerContext } from "../helpers/register-tool.js";
 import type {
   MutationRequestState,
   OperationLedger,
@@ -73,6 +74,7 @@ export async function createProductionRuntime(
         claims.sub,
         claims.client_id ?? claims.azp,
         claims[config.authOrganizationClaim],
+        companyIdFromServerContext(context),
         scopesFromContext(context),
         context.mcpReq.method,
       ]

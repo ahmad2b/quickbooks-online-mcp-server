@@ -20,6 +20,7 @@ export type ExecutionContext = Readonly<{
   subjectId: string;
   oauthClientId: string;
   organizationId: string;
+  companyId: string;
   scopes: ReadonlySet<QuickBooksScope>;
 }>;
 

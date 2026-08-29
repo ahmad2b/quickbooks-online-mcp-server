@@ -12,7 +12,7 @@ import { z } from "zod";
 import { ClaimBindingAuthorizationPolicy } from "../../src/runtime/authorization-policy";
 import { createHttpApp, makeExecutionInputMiddleware } from "../../src/http-server";
 import { OAuthAccessTokenVerifier } from "../../src/auth/oauth-access-token-verifier";
-import { RegisterTool } from "../../src/helpers/register-tool";
+import { DEVRAFTEL_COMPANY_ID_META_KEY, RegisterTool } from "../../src/helpers/register-tool";
 import type {
   ExecutionContext,
   OperationLedger,
@@ -27,6 +27,8 @@ import type { ToolDefinition } from "../../src/types/tool-definition";
 const RESOURCE = "https://quickbooks-mcp.example/mcp";
 const ISSUER = "https://auth.example/issuer";
 const ORGANIZATION_CLAIM = "https://claims.example/organization";
+const COMPANY_A = "00000000-0000-4000-8000-000000000001";
+const COMPANY_B = "00000000-0000-4000-8000-000000000002";
 
 type FakeToken = {
   tenant: string;
@@ -39,6 +41,7 @@ type FakeToken = {
 type QboCall = {
   id: string;
   organizationId: string;
+  companyId: string;
   qboConnectionId: string;
   realmId: string;
   accessToken: string;
@@ -116,7 +119,7 @@ function makeHarness(options: { leaseError?: Error } = {}): Harness {
   const qboCalls: QboCall[] = [];
   const leaseCreate = jest.fn(async (execution: ExecutionContext): Promise<QboClientLease> => {
     if (options.leaseError) throw options.leaseError;
-    const qboConnectionId = `connection-${execution.organizationId}`;
+    const qboConnectionId = `connection-${execution.organizationId}-${execution.companyId}`;
     const accessToken = `access-${qboConnectionId}`;
     const realmId = `realm-${qboConnectionId}`;
     const qbo = {
@@ -124,6 +127,7 @@ function makeHarness(options: { leaseError?: Error } = {}): Harness {
         qboCalls.push({
           id,
           organizationId: execution.organizationId,
+          companyId: execution.companyId,
           qboConnectionId,
           realmId,
           accessToken,
@@ -142,7 +146,10 @@ function makeHarness(options: { leaseError?: Error } = {}): Harness {
   });
   const rateConsume = jest.fn(async () => ({ allowed: true, retryAfterSeconds: 0 }));
   const qboExecutionLeaseProvider = {
-    resolveConnectionBinding: jest.fn(async (execution: ExecutionContext) => `connection-${execution.organizationId}`),
+    resolveConnectionBinding: jest.fn(
+      async (execution: ExecutionContext) =>
+        `connection-${execution.organizationId}-${execution.companyId}`,
+    ),
     acquire: jest.fn(async () => { throw new Error("unused test provider acquire"); }),
   };
   const ledger: OperationLedger = {
@@ -271,7 +278,12 @@ function runExecutionInputGuard(body: unknown): { next: boolean; status?: number
   return { next, status, body: responseBody };
 }
 
-function callBody(name: string, id = "42", argumentsOverride?: Record<string, unknown>) {
+function callBody(
+  name: string,
+  id = "42",
+  argumentsOverride?: Record<string, unknown>,
+  companyId = COMPANY_A,
+) {
   return {
     jsonrpc: "2.0",
     id,
@@ -283,6 +295,7 @@ function callBody(name: string, id = "42", argumentsOverride?: Record<string, un
         [PROTOCOL_VERSION_META_KEY]: "2026-07-28",
         [CLIENT_INFO_META_KEY]: { name: "execution-test-client", version: "test" },
         [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
+        [DEVRAFTEL_COMPANY_ID_META_KEY]: companyId,
       },
     },
   };
@@ -295,18 +308,46 @@ describe("authenticated HTTP execution seam", () => {
     const harness = makeHarness();
 
     const [tenantA, tenantB] = await Promise.all([
-      post(harness, "tenant-a", callBody("get_probe", "a")),
-      post(harness, "tenant-b", callBody("get_probe", "b")),
+      post(harness, "tenant-a", callBody("get_probe", "a", undefined, COMPANY_A)),
+      post(harness, "tenant-b", callBody("get_probe", "b", undefined, COMPANY_B)),
     ]);
 
     expect(tenantA.status).toBe(200);
     expect(tenantB.status).toBe(200);
     expect(harness.qboCalls).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "a", organizationId: "organization-tenant-a", qboConnectionId: "connection-organization-tenant-a", realmId: "realm-connection-organization-tenant-a", accessToken: "access-connection-organization-tenant-a" }),
-      expect.objectContaining({ id: "b", organizationId: "organization-tenant-b", qboConnectionId: "connection-organization-tenant-b", realmId: "realm-connection-organization-tenant-b", accessToken: "access-connection-organization-tenant-b" }),
+      expect.objectContaining({
+        id: "a",
+        organizationId: "organization-tenant-a",
+        companyId: COMPANY_A,
+        qboConnectionId: `connection-organization-tenant-a-${COMPANY_A}`,
+      }),
+      expect.objectContaining({
+        id: "b",
+        organizationId: "organization-tenant-b",
+        companyId: COMPANY_B,
+        qboConnectionId: `connection-organization-tenant-b-${COMPANY_B}`,
+      }),
     ]));
     expect(harness.leaseCreate).toHaveBeenCalledTimes(2);
     expect(harness.leaseCreate.mock.calls.every(([execution]) => !("qboConnectionId" in execution))).toBe(true);
+  });
+
+  it("denies missing or invalid Company metadata before lease acquisition", async () => {
+    const harness = makeHarness();
+    const missing = callBody("get_probe");
+    const missingMeta: Partial<Record<string, unknown>> = missing.params._meta;
+    delete missingMeta[DEVRAFTEL_COMPANY_ID_META_KEY];
+    const invalid = callBody("get_probe", "invalid", undefined, "company-from-model");
+
+    const [missingResponse, invalidResponse] = await Promise.all([
+      post(harness, "tenant-a", missing),
+      post(harness, "tenant-a", invalid),
+    ]);
+
+    expect(missingResponse.body.result?.isError).toBe(true);
+    expect(invalidResponse.body.result?.isError).toBe(true);
+    expect(harness.leaseCreate).not.toHaveBeenCalled();
+    expect(harness.qboCalls).toHaveLength(0);
   });
 
   it("denies missing or ambiguous organization grants before lease acquisition", async () => {

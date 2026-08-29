@@ -1,5 +1,6 @@
 import { describe, expect, it, jest } from "@jest/globals";
 import { RequestScopedQboClientFactory, QboExecutionError } from "../../../src/clients/quickbooks-client";
+import { FinanceExecutionLeaseProvider } from "../../../src/adapters/finance-execution-lease-provider";
 import type {
   ExecutionContext,
   QboExecutionLease,
@@ -12,6 +13,7 @@ const context: ExecutionContext = Object.freeze({
   subjectId: "user-1",
   oauthClientId: "client-1",
   organizationId: "org-1",
+  companyId: "00000000-0000-4000-8000-000000000001",
   scopes: new Set<"quickbooks.read">(["quickbooks.read"]),
 });
 
@@ -108,5 +110,126 @@ describe("RequestScopedQboClientFactory", () => {
     await result.close();
     await result.close();
     expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+const CONNECTION_ID = "00000000-0000-4000-8000-000000000002";
+const LEASE_ID = "00000000-0000-4000-8000-000000000003";
+const WORKLOAD_TOKEN = "finance-workload-token-with-32-characters";
+
+function jsonResponse(body: Record<string, unknown>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function bindingResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    organization_id: context.organizationId,
+    company_id: context.companyId,
+    qbo_connection_id: CONNECTION_ID,
+    environment: "sandbox",
+    credential_version: "7",
+    ...overrides,
+  };
+}
+
+function leaseResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...bindingResponse(),
+    lease_id: LEASE_ID,
+    access_token: "temporary-intuit-access-token",
+    realm_id: "realm-123",
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    ...overrides,
+  };
+}
+
+describe("FinanceExecutionLeaseProvider", () => {
+  it("uses only workload auth and verified execution metadata for binding and lease calls", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = jest.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      return String(input).endsWith("/connection-binding")
+        ? jsonResponse(bindingResponse())
+        : jsonResponse(leaseResponse());
+    }) as unknown as typeof fetch;
+    const provider = new FinanceExecutionLeaseProvider({
+      baseUrl: "http://finance.internal/",
+      workloadToken: WORKLOAD_TOKEN,
+      environment: "sandbox",
+      fetchImpl,
+    });
+
+    await expect(provider.resolveConnectionBinding(context)).resolves.toBe(CONNECTION_ID);
+    await expect(provider.acquire(context)).resolves.toMatchObject({
+      leaseId: LEASE_ID,
+      qboConnectionId: CONNECTION_ID,
+      accessToken: "temporary-intuit-access-token",
+      realmId: "realm-123",
+      environment: "sandbox",
+      credentialVersion: "7",
+    });
+
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      const headers = call.init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe(`Bearer ${WORKLOAD_TOKEN}`);
+      const body = JSON.parse(String(call.init.body)) as Record<string, any>;
+      expect(body).toMatchObject({
+        request_id: context.requestId,
+        organization_id: context.organizationId,
+        company_id: context.companyId,
+        environment: "sandbox",
+      });
+      expect(body).not.toHaveProperty("access_token");
+      expect(body).not.toHaveProperty("refresh_token");
+      expect(body.caller.scopes).toEqual(["quickbooks.read"]);
+    }
+  });
+
+  it("rejects tenant mismatches and forbidden credential-bearing response fields", async () => {
+    const mismatchedFetch = jest.fn(async () => jsonResponse(bindingResponse({
+      company_id: "00000000-0000-4000-8000-000000000099",
+    }))) as unknown as typeof fetch;
+    const mismatched = new FinanceExecutionLeaseProvider({
+      baseUrl: "http://finance.internal/",
+      workloadToken: WORKLOAD_TOKEN,
+      environment: "sandbox",
+      fetchImpl: mismatchedFetch,
+    });
+    await expect(mismatched.resolveConnectionBinding(context)).rejects.toMatchObject({
+      code: "QBO_EXECUTION_LEASE_INVALID",
+    });
+
+    const forbiddenFetch = jest.fn(async () => jsonResponse(leaseResponse({
+      refresh_token: "must-never-cross-the-boundary",
+    }))) as unknown as typeof fetch;
+    const forbidden = new FinanceExecutionLeaseProvider({
+      baseUrl: "http://finance.internal/",
+      workloadToken: WORKLOAD_TOKEN,
+      environment: "sandbox",
+      fetchImpl: forbiddenFetch,
+    });
+    await expect(forbidden.acquire(context)).rejects.toMatchObject({
+      code: "QBO_EXECUTION_LEASE_INVALID",
+    });
+  });
+
+  it("maps broker failures to a safe unavailable error without retrying", async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse({ error: "private detail" }, 503)) as unknown as typeof fetch;
+    const provider = new FinanceExecutionLeaseProvider({
+      baseUrl: "http://finance.internal/",
+      workloadToken: WORKLOAD_TOKEN,
+      environment: "sandbox",
+      fetchImpl,
+    });
+
+    await expect(provider.acquire(context)).rejects.toMatchObject({
+      code: "QBO_EXECUTION_LEASE_UNAVAILABLE",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

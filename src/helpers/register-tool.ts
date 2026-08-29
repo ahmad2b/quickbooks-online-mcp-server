@@ -71,6 +71,10 @@ const FORBIDDEN_EXECUTION_KEYS = new Set([
 export const FORBIDDEN_EXECUTION_INPUT_MESSAGE =
   "Organization, company, connection, realm, environment, credential, and server-file fields are not accepted as tool input.";
 
+export const DEVRAFTEL_COMPANY_ID_META_KEY = "com.devraftel.finance/company_id";
+const CANONICAL_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export function getCrudCategory(toolName: string): CrudCategory {
   for (const [prefix, category] of Object.entries(PREFIX_CATEGORY_MAP)) {
     if (toolName.startsWith(prefix)) return category;
@@ -159,6 +163,16 @@ function claimsFromContext(context: ServerContext): Readonly<Record<string, unkn
     : {};
 }
 
+/** Read the Company selector injected by trusted client runtime code. */
+export function companyIdFromServerContext(context: ServerContext): string | undefined {
+  const meta = context.mcpReq?._meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return undefined;
+  const raw = (meta as Record<string, unknown>)[DEVRAFTEL_COMPANY_ID_META_KEY];
+  if (typeof raw !== "string" || raw !== raw.trim()) return undefined;
+  const normalized = raw.toLowerCase();
+  return CANONICAL_UUID_PATTERN.test(normalized) ? normalized : undefined;
+}
+
 /** Build the immutable context once from verified AuthInfo claims. */
 export function executionContextFromServerContext(
   context: ServerContext,
@@ -168,6 +182,8 @@ export function executionContextFromServerContext(
   const decision = services.authorizationPolicy.authorize(claimsFromContext(context));
   if (!decision.allowed) return undefined;
   const identity = decision.identity;
+  const companyId = companyIdFromServerContext(context);
+  if (!companyId) return undefined;
   // The verifier is responsible for cryptographic validation, but the
   // execution seam still refuses an inconsistent AuthInfo object. This keeps
   // custom test/deployment verifiers from substituting a different principal
@@ -188,6 +204,7 @@ export function executionContextFromServerContext(
     subjectId: identity.subject,
     oauthClientId: identity.clientId,
     organizationId: identity.organizationId,
+    companyId,
     scopes,
   });
 }

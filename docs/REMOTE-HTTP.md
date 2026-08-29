@@ -11,9 +11,11 @@ DevRaftel control-plane infrastructure owns organizations, membership,
 connection selection, Intuit OAuth exchange, refresh-token storage and
 rotation, revocation, and reauthorization state. This MCP resource server
 verifies a resource-bound access token and extracts one configured organization
-claim. The trusted lease provider resolves the QuickBooks connection after
-authorization; the server never accepts connection, company, realm, or
-credential values from headers or tool arguments.
+claim. Agent runtime code selects a Company through the namespaced per-call MCP
+metadata key `com.devraftel.finance/company_id`. That value remains only a
+resource selector: it is never accepted as model tool input, and Finance must
+verify that the Company belongs to the verified organization before resolving
+an active QuickBooks connection.
 
 After authorization, the runtime creates an immutable `ExecutionContext` and
 requests one short-lived execution lease from the injected
@@ -23,10 +25,13 @@ contains a refresh token or client secret. The request-scoped
 `QboClientFactory` constructs a fresh `node-quickbooks` client and releases it
 after the call. No client, token, realm, or connection is process-global.
 
-The internal connection-service protocol is intentionally not defined here.
-Deployment supplies an authenticated adapter implementing the port in
-`src/runtime/contracts.ts`. The same boundary applies to the durable
-operation ledger and shared rate limiter.
+`FinanceExecutionLeaseProvider` implements the connection-service port over
+private HTTP. It authenticates with a dedicated workload bearer token, performs
+one credential-free binding lookup before mutation confirmation, and performs
+one credential-bearing lease lookup only when a tool is ready to execute. It
+uses no retries or cache and strictly checks organization, Company, environment,
+expiry, and response shape. The same concrete adapter does not yet exist for the
+durable operation ledger and shared rate limiter.
 
 ## Authorization and scopes
 
@@ -80,7 +85,11 @@ Copy `.env.example`. Required values include:
 - `MCP_AUTH_ORGANIZATION_CLAIM` (the AuthCo value is
   `https://devraftel.com/organization_id`);
 - independent 32-byte request-state and operation-fingerprint keys;
-- deployment-supplied lease, ledger, rate-limit, and workload-identity
+- `QBO_EXECUTION_LEASE_PROVIDER=finance-http` plus
+  `FINANCE_QUICKBOOKS_INTERNAL_URL`, the dedicated
+  `FINANCE_QUICKBOOKS_WORKLOAD_TOKEN`, `FINANCE_QUICKBOOKS_ENVIRONMENT`, and a
+  bounded `FINANCE_QUICKBOOKS_TIMEOUT_MS`;
+- deployment-supplied durable ledger, shared rate-limit, and workload-identity
   adapter references.
 
 The runtime must not be configured with `DATABASE_URL`, an MCP encryption key,

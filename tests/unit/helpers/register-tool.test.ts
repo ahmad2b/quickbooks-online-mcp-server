@@ -7,6 +7,7 @@ import {
   isToolDisabled,
   RegisterTool,
   hasForbiddenExecutionField,
+  DEVRAFTEL_COMPANY_ID_META_KEY,
 } from "../../../src/helpers/register-tool";
 import { z } from "zod";
 import type { ToolDefinition } from "../../../src/types/tool-definition";
@@ -78,6 +79,9 @@ function authContext(overrides: Record<string, unknown> = {}) {
     http: { authInfo: { clientId: "client", scopes: ["quickbooks.read", "quickbooks.write", "quickbooks.delete"], extra: { claims } } },
     mcpReq: {
       method: "tools/call",
+      _meta: {
+        [DEVRAFTEL_COMPANY_ID_META_KEY]: "00000000-0000-4000-8000-000000000001",
+      },
       requestState: () => undefined,
       inputResponses: undefined,
     },
@@ -133,6 +137,7 @@ describe("authority metadata", () => {
     expect(authorizeToolContext(definition, { http: { authInfo: { scopes: ["quickbooks.read"] } } }, services).allowed).toBe(false);
     expect(authorizeToolContext(definition, authContext(), services)).toMatchObject({ allowed: true, execution: {
       organizationId: "org",
+      companyId: "00000000-0000-4000-8000-000000000001",
     } });
   });
 });
