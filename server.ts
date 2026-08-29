@@ -15,7 +15,7 @@ app.use(async (req, res, next) => {
     prepared.setReady(true);
     prepared.app(req, res, next);
   } catch {
-    // Configuration, AuthCo discovery, and provider readiness all fail closed.
+    // Configuration, AuthCo discovery, and Finance provider setup fail closed.
     // Do not expose URLs, secrets, or adapter details from initialization errors.
     initializedApp = undefined;
     if (!res.headersSent) {

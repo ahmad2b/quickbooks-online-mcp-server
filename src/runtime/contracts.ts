@@ -1,6 +1,4 @@
 import type QuickBooks from "node-quickbooks";
-import type { ServerContext } from "@modelcontextprotocol/server";
-import type { ToolAuthority } from "../types/tool-definition.js";
 
 export type QuickBooksEnvironment = "sandbox" | "production";
 
@@ -41,8 +39,6 @@ export type QboExecutionLease = Readonly<{
  * returns it only in the trusted, short-lived lease.
  */
 export interface QboExecutionLeaseProvider {
-  /** Resolve the trusted connection binding before a mutation is confirmed. */
-  resolveConnectionBinding(context: ExecutionContext): Promise<string>;
   acquire(context: ExecutionContext): Promise<QboExecutionLease>;
   release?(lease: QboExecutionLease, context: ExecutionContext): Promise<void>;
 }
@@ -76,16 +72,6 @@ export type QboHandlerDependencies = Readonly<{
   rawQbo: QboRawClient;
 }>;
 
-export type RateLimitDecision = {
-  allowed: boolean;
-  retryAfterSeconds: number;
-};
-
-/** Shared limiter; implementations must make consume atomic across replicas. */
-export interface RateLimiter {
-  consume(key: string, limit: number, windowMs: number, now: number): Promise<RateLimitDecision>;
-}
-
 export type CallerIdentity = {
   issuer: string;
   subject: string;
@@ -108,54 +94,8 @@ export interface AuthorizationPolicy {
   authorize(claims: Readonly<Record<string, unknown>>): AuthorizationDecision;
 }
 
-export type OperationStatus = "prepared" | "executing" | "succeeded" | "failed" | "unknown";
-
-export type OperationRecord = {
-  id: string;
-  requestId: string;
-  organizationId: string;
-  connectionId: string;
-  principalId: string;
-  toolName: string;
-  authority: Exclude<ToolAuthority, "read">;
-  inputFingerprint: string;
-  fingerprintKeyVersion: string;
-  status: OperationStatus;
-};
-
-export type PrepareOperationResult = {
-  created: boolean;
-  operationId: string;
-  status: OperationStatus;
-};
-
-/** Durable financial idempotency/ambiguity port. */
-export interface OperationLedger {
-  prepare(operation: OperationRecord): Promise<PrepareOperationResult>;
-  transition(id: string, from: readonly OperationStatus[], to: OperationStatus): Promise<boolean>;
-  recoverStale(preparedMaxAgeMs: number, executingMaxAgeMs: number): Promise<number>;
-}
-
-export type MutationRequestState = {
-  operationId: string;
-  toolName: string;
-  inputFingerprint: string;
-  connectionId: string;
-};
-
 /** All execution dependencies are injected; no deployment-level company exists. */
 export type RuntimeServices = {
   qboClientFactory: QboClientFactory;
-  qboExecutionLeaseProvider: QboExecutionLeaseProvider;
-  rateLimiter: RateLimiter;
   authorizationPolicy: AuthorizationPolicy;
-  operationLedger: OperationLedger;
-  operationFingerprint: {
-    key: Uint8Array;
-    keyVersion: string;
-  };
-  requestStateCodec: {
-    mint(payload: MutationRequestState, context: ServerContext): Promise<string>;
-    verify(state: string, context: ServerContext): Promise<MutationRequestState>;
-  };
 };

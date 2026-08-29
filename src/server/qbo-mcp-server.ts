@@ -19,7 +19,6 @@ export function createQuickbooksMcpServer(services: RuntimeServices): McpServer 
     capabilities: {
       tools: {},
     },
-    requestState: { verify: services.requestStateCodec.verify },
   });
 
   for (const definition of getToolDefinitions()) {

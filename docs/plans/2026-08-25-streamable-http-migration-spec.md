@@ -1,3 +1,5 @@
+> **Historical design note (superseded 2026-08-29):** Ledger, application-rate-limit, and MCP mutation-confirmation requirements in this document were later removed. Current behavior is defined by `docs/ARCHITECTURE.md` and `docs/REMOTE-HTTP.md`.
+
 # QuickBooks Online MCP: Modern Streamable HTTP Migration Specification
 
 - **Status:** Implementation in progress; live deployment/conformance validation pending

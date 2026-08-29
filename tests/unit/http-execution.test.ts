@@ -15,10 +15,8 @@ import { OAuthAccessTokenVerifier } from "../../src/auth/oauth-access-token-veri
 import { DEVRAFTEL_COMPANY_ID_META_KEY, RegisterTool } from "../../src/helpers/register-tool";
 import type {
   ExecutionContext,
-  OperationLedger,
   QboClientLease,
   QboHandlerDependencies,
-  RateLimiter,
   RuntimeServices,
 } from "../../src/runtime/contracts";
 import type { HttpConfig } from "../../src/http-config";
@@ -51,8 +49,6 @@ type Harness = {
   app: ReturnType<typeof createHttpApp>;
   leaseCreate: jest.MockedFunction<(execution: ExecutionContext) => Promise<QboClientLease>>;
   qboCalls: QboCall[];
-  rateConsume: jest.MockedFunction<RateLimiter["consume"]>;
-  ledger: OperationLedger;
   verifyAccessToken: jest.MockedFunction<(token: string) => Promise<AuthInfo>>;
 };
 
@@ -67,7 +63,6 @@ const oauthMetadata: OAuthMetadata = {
 };
 
 function config(): HttpConfig {
-  const key = Buffer.alloc(32, 7).toString("base64");
   return {
     resourceUri: new URL(RESOURCE),
     authIssuer: ISSUER,
@@ -81,15 +76,8 @@ function config(): HttpConfig {
     allowedOrigins: ["127.0.0.1"],
     bodyLimit: "1mb",
     requestTimeoutMs: 2_000,
-    rateLimitPerMinute: 100,
-    requestStateKey: key,
-    operationFingerprintKey: key,
-    operationFingerprintKeyVersion: "test-v1",
     authOrganizationClaim: ORGANIZATION_CLAIM,
     qboExecutionLeaseProvider: "test-lease-provider",
-    operationLedgerProvider: "test-ledger-provider",
-    rateLimitProvider: "test-rate-provider",
-    workloadIdentity: "test-workload",
   };
 }
 
@@ -144,33 +132,12 @@ function makeHarness(options: { leaseError?: Error } = {}): Harness {
       close: jest.fn(async () => undefined),
     };
   });
-  const rateConsume = jest.fn(async () => ({ allowed: true, retryAfterSeconds: 0 }));
-  const qboExecutionLeaseProvider = {
-    resolveConnectionBinding: jest.fn(
-      async (execution: ExecutionContext) =>
-        `connection-${execution.organizationId}-${execution.companyId}`,
-    ),
-    acquire: jest.fn(async () => { throw new Error("unused test provider acquire"); }),
-  };
-  const ledger: OperationLedger = {
-    prepare: jest.fn(async (operation: Parameters<OperationLedger["prepare"]>[0]) => ({ created: true, operationId: operation.id, status: "prepared" as const })),
-    transition: jest.fn(async () => true),
-    recoverStale: jest.fn(async () => 0),
-  };
   const services: RuntimeServices = {
     qboClientFactory: { create: leaseCreate },
-    qboExecutionLeaseProvider,
-    rateLimiter: { consume: rateConsume } as RateLimiter,
     authorizationPolicy: new ClaimBindingAuthorizationPolicy({
       issuer: ISSUER,
       organizationClaim: ORGANIZATION_CLAIM,
     }),
-    operationLedger: ledger,
-    operationFingerprint: { key: Buffer.alloc(32, 11), keyVersion: "test-v1" },
-    requestStateCodec: {
-      mint: jest.fn(async () => "signed-test-state"),
-      verify: jest.fn(async () => ({ operationId: "operation", toolName: "create_probe", inputFingerprint: "fingerprint", connectionId: "test-connection" })),
-    },
   };
   const schema = z.object({ id: z.string().min(1) });
   const handler = async (
@@ -210,10 +177,7 @@ function makeHarness(options: { leaseError?: Error } = {}): Harness {
   const serverFactory: McpServerFactory = () => {
     const server = new McpServer(
       { name: "HTTP execution test server", version: "test" },
-      {
-        capabilities: { tools: {} },
-        requestState: { verify: services.requestStateCodec.verify },
-      },
+      { capabilities: { tools: {} } },
     );
     RegisterTool(server, readDefinition, services);
     RegisterTool(server, writeDefinition, services);
@@ -228,7 +192,7 @@ function makeHarness(options: { leaseError?: Error } = {}): Harness {
     toolAuthority: (name: string) => name === "get_probe" ? "read" : name === "create_probe" ? "write" : undefined,
     logger: () => undefined,
   });
-  return { app, leaseCreate, qboCalls, rateConsume, ledger, verifyAccessToken };
+  return { app, leaseCreate, qboCalls, verifyAccessToken };
 }
 
 async function post(harness: Harness, token: string, body: unknown): Promise<{ status: number; body: Record<string, any> }> {
@@ -294,7 +258,7 @@ function callBody(
       _meta: {
         [PROTOCOL_VERSION_META_KEY]: "2026-07-28",
         [CLIENT_INFO_META_KEY]: { name: "execution-test-client", version: "test" },
-        [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
+        [CLIENT_CAPABILITIES_META_KEY]: {},
         [DEVRAFTEL_COMPANY_ID_META_KEY]: companyId,
       },
     },
@@ -362,7 +326,6 @@ describe("authenticated HTTP execution seam", () => {
     expect(ambiguousOrganization.body.result?.isError).toBe(true);
     expect(harness.leaseCreate).not.toHaveBeenCalled();
     expect(harness.qboCalls).toHaveLength(0);
-    expect(harness.rateConsume).not.toHaveBeenCalled();
   });
 
   it("rejects model-controlled execution fields without touching QBO", () => {
@@ -384,7 +347,7 @@ describe("authenticated HTTP execution seam", () => {
     expect(harness.qboCalls).toHaveLength(0);
   });
 
-  it("enforces write scope before lease acquisition and starts mutations with MRTR", async () => {
+  it("enforces write scope before acquiring one lease and executing the mutation", async () => {
     const harness = makeHarness();
 
     const readOnly = await post(harness, "read-only", callBody("create_probe"));
@@ -393,10 +356,13 @@ describe("authenticated HTTP execution seam", () => {
     expect(readOnly.status).toBe(200);
     expect(readOnly.body.result?.isError).toBe(true);
     expect(mutation.status).toBe(200);
-    expect(mutation.body.result?.resultType ?? mutation.body.result?.structuredContent?.resultType).toBe("input_required");
-    expect(harness.leaseCreate).not.toHaveBeenCalled();
-    expect(harness.qboCalls).toHaveLength(0);
-    expect(harness.ledger.prepare).toHaveBeenCalledTimes(1);
+    expect(mutation.body.result?.isError).not.toBe(true);
+    expect(harness.leaseCreate).toHaveBeenCalledTimes(1);
+    expect(harness.qboCalls).toHaveLength(1);
+    expect(harness.qboCalls[0]).toMatchObject({
+      organizationId: "organization-tenant-a",
+      companyId: COMPANY_A,
+    });
   });
 
   it("returns a safe execution error when the lease provider is unavailable", async () => {

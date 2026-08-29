@@ -144,14 +144,6 @@ export class FinanceExecutionLeaseProvider implements QboExecutionLeaseProvider 
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  async resolveConnectionBinding(context: ExecutionContext): Promise<string> {
-    const payload = await this.post("connection-binding", context);
-    const parsed = bindingSchema.safeParse(payload);
-    if (!parsed.success) throw invalid();
-    this.assertBinding(parsed.data, context);
-    return parsed.data.qbo_connection_id;
-  }
-
   async acquire(context: ExecutionContext): Promise<QboExecutionLease> {
     const payload = await this.post("execution-lease", context);
     const parsed = leaseSchema.safeParse(payload);

@@ -38,7 +38,6 @@ import type { RuntimeServices } from "./runtime/contracts.js";
 import { createProductionRuntime, type RuntimeProviderAdapters } from "./runtime/production-runtime.js";
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
-const WINDOW_MS = 60_000;
 
 type RequestBody = {
   id?: unknown;
@@ -267,56 +266,6 @@ function makeScopeMiddleware(
   };
 }
 
-function makeRateLimitMiddleware(
-  config: HttpConfig,
-  now: () => number,
-  resolver: ((name: string) => ToolAuthority | undefined) | undefined,
-  services: RuntimeServices,
-) {
-  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const authInfo = req.auth;
-    if (!authInfo) {
-      next();
-      return;
-    }
-
-    try {
-      const claims = authInfo.extra?.claims;
-      const claimRecord = claims && typeof claims === "object" && !Array.isArray(claims)
-        ? claims as Record<string, unknown>
-        : {};
-      const identity = services.authorizationPolicy.authorize(claimRecord);
-      if (!identity.allowed) {
-        sendJsonRpcError(req, res, 403, -32001, "The caller is not authorized for this resource");
-        return;
-      }
-      const identityKey = [
-        identity.identity.issuer,
-        identity.identity.subject,
-        identity.identity.clientId,
-        identity.identity.organizationId,
-      ]
-        .map((value) => stableIdentifier(typeof value === "string" ? value : undefined))
-        .join(":");
-      const key = `${identityKey}:${authorityClass(req, resolver)}`;
-      const decision = await services.rateLimiter.consume(
-        key,
-        config.rateLimitPerMinute,
-        WINDOW_MS,
-        now(),
-      );
-      if (!decision.allowed) {
-        res.setHeader("Retry-After", String(decision.retryAfterSeconds));
-        sendJsonRpcError(req, res, 429, -32000, "Too many requests");
-        return;
-      }
-      next();
-    } catch {
-      sendJsonRpcError(req, res, 503, -32603, "Rate-limit service unavailable");
-    }
-  };
-}
-
 function makeOrganizationBindingMiddleware(config: HttpConfig, services: RuntimeServices) {
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(config.resourceUri);
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -499,7 +448,6 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
   const scope = makeScopeMiddleware(options.config, toolAuthority);
   const organizationBinding = makeOrganizationBindingMiddleware(options.config, options.services);
   const executionInput = makeExecutionInputMiddleware();
-  const rateLimit = makeRateLimitMiddleware(options.config, now, toolAuthority, options.services);
   const nodeHandler = toNodeHandler(handler, {
     onerror: (error) => {
       process.stderr.write(`{"event":"mcp_node_handler_error","type":"${error.name}"}\n`);
@@ -520,7 +468,7 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
     // Application-enforced cancellation is safe for reads. It is deliberately
     // not applied after dispatching a financial mutation: terminating the HTTP
     // request cannot cancel a QuickBooks commit and would create a false retry
-    // signal. Mutation outcomes are instead recorded in the durable ledger.
+    // signal. The caller must treat a lost mutation response as ambiguous.
     const readRequest = authorityClass(req, toolAuthority) === "read";
     const timeout = readRequest
       ? setTimeout(() => {
@@ -534,7 +482,7 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
       state.inFlight = Math.max(0, state.inFlight - 1);
     });
     next();
-  }, bearer, organizationBinding, executionInput, rateLimit, scope, async (req: Request, res: Response, next: NextFunction) => {
+  }, bearer, organizationBinding, executionInput, scope, async (req: Request, res: Response, next: NextFunction) => {
     try {
       await nodeHandler(req, res, req.body);
     } catch (error) {
@@ -579,8 +527,8 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
 /**
  * Build the production Express application without binding a port. Hosting
  * platforms such as Vercel own the listener and can call this initializer once
- * per warm function instance. Provider readiness still completes before the
- * application is marked ready or any QuickBooks tool can run.
+ * per warm function instance. Static configuration is validated before the
+ * application is marked ready; Finance lease availability is checked per call.
  */
 export async function prepareHttpApp(
   options: ProductionHttpAppOptions = {},
@@ -599,9 +547,9 @@ export async function prepareHttpApp(
     fetchImpl: options.fetchImpl,
   });
 
-  // Runtime composition performs provider readiness checks without acquiring a
-  // customer lease. No QuickBooks credential is loaded during cold start.
-  const ownedRuntime = options.services ? undefined : await createProductionRuntime(config, options.runtimeAdapters);
+  // Runtime composition validates configuration without acquiring a customer
+  // lease. No QuickBooks credential is loaded during cold start.
+  const ownedRuntime = options.services ? undefined : await createProductionRuntime(config, options.runtimeAdapters, options.fetchImpl);
   const services = options.services ?? ownedRuntime!.services;
 
   let appState: HttpApp;
@@ -609,8 +557,8 @@ export async function prepareHttpApp(
     let serverFactory = options.serverFactory;
     let toolAuthority = options.toolAuthority;
     if (!serverFactory) {
-      // Import the QuickBooks registry only after configuration, OAuth metadata,
-      // and durable-state validation have succeeded.
+      // Import the QuickBooks registry only after configuration and OAuth
+      // metadata validation have succeeded.
       const registry = await import("./registry.js");
       if (!toolAuthority) {
         const authorityByName = new Map(

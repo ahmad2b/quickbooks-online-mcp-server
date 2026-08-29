@@ -32,8 +32,6 @@ function lease(overrides: Partial<QboExecutionLease> = {}): QboExecutionLease {
 
 function provider(result: QboExecutionLease | Error): QboExecutionLeaseProvider {
   return {
-    resolveConnectionBinding: jest.fn(async () =>
-      result instanceof Error ? "connection-1" : result.qboConnectionId),
     acquire: jest.fn(async () => {
       if (result instanceof Error) throw result;
       return result;
@@ -71,7 +69,6 @@ describe("RequestScopedQboClientFactory", () => {
     const acquire = jest.fn<QboExecutionLeaseProvider["acquire"]>(async (_context) =>
       lease({ qboConnectionId: "connection-2" }));
     const factory = new RequestScopedQboClientFactory({
-      resolveConnectionBinding: async () => "connection-2",
       acquire,
     });
     await factory.create(context);
@@ -98,7 +95,6 @@ describe("RequestScopedQboClientFactory", () => {
   it("calls an optional provider release exactly once", async () => {
     const release = jest.fn(async () => undefined);
     const leaseProvider: QboExecutionLeaseProvider = {
-      resolveConnectionBinding: async () => "connection-1",
       acquire: async () => lease(),
       release,
     };
@@ -125,7 +121,7 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   });
 }
 
-function bindingResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function leaseBindingResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     organization_id: context.organizationId,
     company_id: context.companyId,
@@ -138,7 +134,7 @@ function bindingResponse(overrides: Record<string, unknown> = {}): Record<string
 
 function leaseResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    ...bindingResponse(),
+    ...leaseBindingResponse(),
     lease_id: LEASE_ID,
     access_token: "temporary-intuit-access-token",
     realm_id: "realm-123",
@@ -148,13 +144,11 @@ function leaseResponse(overrides: Record<string, unknown> = {}): Record<string, 
 }
 
 describe("FinanceExecutionLeaseProvider", () => {
-  it("uses only workload auth and verified execution metadata for binding and lease calls", async () => {
+  it("uses only workload auth and verified execution metadata for one lease call", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = jest.fn(async (input: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(input), init: init ?? {} });
-      return String(input).endsWith("/connection-binding")
-        ? jsonResponse(bindingResponse())
-        : jsonResponse(leaseResponse());
+      return jsonResponse(leaseResponse());
     }) as unknown as typeof fetch;
     const provider = new FinanceExecutionLeaseProvider({
       baseUrl: "http://finance.internal/",
@@ -163,7 +157,6 @@ describe("FinanceExecutionLeaseProvider", () => {
       fetchImpl,
     });
 
-    await expect(provider.resolveConnectionBinding(context)).resolves.toBe(CONNECTION_ID);
     await expect(provider.acquire(context)).resolves.toMatchObject({
       leaseId: LEASE_ID,
       qboConnectionId: CONNECTION_ID,
@@ -173,7 +166,7 @@ describe("FinanceExecutionLeaseProvider", () => {
       credentialVersion: "7",
     });
 
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(1);
     for (const call of calls) {
       const headers = call.init.headers as Record<string, string>;
       expect(headers.Authorization).toBe(`Bearer ${WORKLOAD_TOKEN}`);
@@ -191,7 +184,7 @@ describe("FinanceExecutionLeaseProvider", () => {
   });
 
   it("rejects tenant mismatches and forbidden credential-bearing response fields", async () => {
-    const mismatchedFetch = jest.fn(async () => jsonResponse(bindingResponse({
+    const mismatchedFetch = jest.fn(async () => jsonResponse(leaseResponse({
       company_id: "00000000-0000-4000-8000-000000000099",
     }))) as unknown as typeof fetch;
     const mismatched = new FinanceExecutionLeaseProvider({
@@ -200,7 +193,7 @@ describe("FinanceExecutionLeaseProvider", () => {
       environment: "sandbox",
       fetchImpl: mismatchedFetch,
     });
-    await expect(mismatched.resolveConnectionBinding(context)).rejects.toMatchObject({
+    await expect(mismatched.acquire(context)).rejects.toMatchObject({
       code: "QBO_EXECUTION_LEASE_INVALID",
     });
 

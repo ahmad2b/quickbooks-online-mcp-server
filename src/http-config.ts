@@ -19,16 +19,9 @@ export type HttpConfig = {
   allowedOrigins: string[];
   bodyLimit: string;
   requestTimeoutMs: number;
-  rateLimitPerMinute: number;
-  requestStateKey: string;
-  operationFingerprintKey: string;
-  operationFingerprintKeyVersion: string;
   authOrganizationClaim: string;
   /** Opaque adapter references; transport is selected by DevRaftel deployment. */
   qboExecutionLeaseProvider: string;
-  operationLedgerProvider: string;
-  rateLimitProvider: string;
-  workloadIdentity: string;
 };
 
 export class HttpConfigurationError extends Error {
@@ -50,26 +43,6 @@ function parsePositiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) errors.push(name);
   return Number.isInteger(value) && value > 0 ? value : fallback;
-}
-
-function validateBase64Key(
-  value: string | undefined,
-  name: string,
-  expectedBytes: number,
-  errors: string[],
-): void {
-  if (!value) return;
-  try {
-    const decoded = Buffer.from(value, "base64");
-    if (
-      decoded.length !== expectedBytes ||
-      decoded.toString("base64").replace(/=+$/, "") !== value.replace(/=+$/, "")
-    ) {
-      errors.push(name);
-    }
-  } catch {
-    errors.push(name);
-  }
 }
 
 function hostnameFromAllowlistValue(value: string): string | undefined {
@@ -166,20 +139,8 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
   const allowedOrigins = parseHostAllowlist(env.MCP_ALLOWED_ORIGINS, "MCP_ALLOWED_ORIGINS", errors);
   const bodyLimit = env.MCP_BODY_LIMIT?.trim() || "1mb";
   const requestTimeoutMs = parsePositiveInt(env, "MCP_REQUEST_TIMEOUT_MS", 30_000, errors);
-  const rateLimitPerMinute = parsePositiveInt(env, "MCP_RATE_LIMIT_PER_MINUTE", 120, errors);
-  const requestStateKey = required(env, "MCP_REQUEST_STATE_KEY", errors);
-  const operationFingerprintKey = required(env, "MCP_OPERATION_FINGERPRINT_KEY", errors);
-  const operationFingerprintKeyVersion = env.MCP_OPERATION_FINGERPRINT_KEY_VERSION?.trim() || "v1";
-  if (!/^[A-Za-z0-9._-]{1,64}$/.test(operationFingerprintKeyVersion)) {
-    errors.push("MCP_OPERATION_FINGERPRINT_KEY_VERSION");
-  }
   const authOrganizationClaim = required(env, "MCP_AUTH_ORGANIZATION_CLAIM", errors);
   const qboExecutionLeaseProvider = required(env, "QBO_EXECUTION_LEASE_PROVIDER", errors);
-  const operationLedgerProvider = required(env, "OPERATION_LEDGER_PROVIDER", errors);
-  const rateLimitProvider = required(env, "RATE_LIMIT_PROVIDER", errors);
-  const workloadIdentity = required(env, "MCP_WORKLOAD_IDENTITY", errors);
-  validateBase64Key(requestStateKey, "MCP_REQUEST_STATE_KEY", 32, errors);
-  validateBase64Key(operationFingerprintKey, "MCP_OPERATION_FINGERPRINT_KEY", 32, errors);
   if (
     errors.length > 0 ||
     !resourceUri ||
@@ -188,13 +149,8 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     !authIntrospectionUrl ||
     !authIntrospectionClientId ||
     !authIntrospectionClientSecret ||
-    !requestStateKey ||
-    !operationFingerprintKey ||
     !authOrganizationClaim ||
-    !qboExecutionLeaseProvider ||
-    !operationLedgerProvider ||
-    !rateLimitProvider ||
-    !workloadIdentity
+    !qboExecutionLeaseProvider
   ) {
     throw new HttpConfigurationError([...new Set(errors)]);
   }
@@ -212,14 +168,7 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     allowedOrigins,
     bodyLimit,
     requestTimeoutMs,
-    rateLimitPerMinute,
-    requestStateKey,
-    operationFingerprintKey,
-    operationFingerprintKeyVersion,
     authOrganizationClaim,
     qboExecutionLeaseProvider,
-    operationLedgerProvider,
-    rateLimitProvider,
-    workloadIdentity,
   };
 }

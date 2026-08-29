@@ -1,85 +1,56 @@
 # Architecture
 
-The QuickBooks Online MCP Server is one stateless MCP `2026-07-28`
-Streamable HTTP resource. It is a resource server and execution data plane;
-it is not the organization database, OAuth token vault, or QuickBooks
-connection control plane.
+The QuickBooks Online MCP Server is a stateless MCP `2026-07-28` resource
+server and execution adapter. It is not the organization database, Intuit OAuth
+token vault, employee authority model, or financial control plane.
 
 ## Request execution
 
 ```text
 MCP client
-  │ HTTPS POST /mcp
-  ▼
-OAuth verifier ── exact resource/audience + issuer + expiry + scopes
-  ▼
-ClaimBindingAuthorizationPolicy
-  │ one immutable caller + organization context
-  ▼
-tool registry ── explicit authority + schema validation
-  │ read: trusted lease now
-  │ mutation: trusted binding → ledger prepare → MRTR confirmation → atomic claim
-  ▼
-QboClientFactory ── one short-lived execution lease
-  │ fresh node-quickbooks client + bounded raw HTTP context
-  ▼
-QuickBooks Online
+  -> AuthCo resource token verification and tool scope check
+  -> organization claim plus trusted Company metadata
+  -> tool schema and forbidden-routing-field validation
+  -> one Finance execution-lease request
+  -> one fresh request-scoped QuickBooks client
+  -> QuickBooks Online
+  -> release request references and return a redacted result
 ```
 
-Authorization, rate limiting, and mutation ledger checks happen before any
-credential-bearing connection-service lease request. A mutation may perform a
-trusted connection-binding lookup before confirmation, but a denied request or
-unconfirmed mutation makes zero QuickBooks or credential-bearing lease calls.
-The trusted lease is checked for connection identity, expiry safety margin,
-environment, and required fields before a client is constructed. The client
-and token references are released after every call.
+Reads, writes, updates, and deletes use the same execution path. Tool authority
+metadata remains explicit so AuthCo scopes and the employee/client supervision
+layer can distinguish risk.
 
 ## Ownership boundaries
 
-DevRaftel infrastructure owns organizations, membership, connection selection,
-Intuit OAuth exchange, refresh-token storage/rotation, revocation, and
-reauthorization. It injects implementations of the provider ports in
-`src/runtime/contracts.ts`:
+Finance owns:
 
-- `QboExecutionLeaseProvider` resolves the authorized connection from the
-  caller/organization context and returns a short-lived access token, realm,
-  environment, opaque connection ID, lease ID, credential version, and expiry;
-- `OperationLedger` durably protects mutation confirmation, idempotency, and
-  ambiguous outcomes;
-- `RateLimiter` provides atomic shared authenticated limits.
+- organization and Company connection records;
+- Intuit OAuth, refresh tokens, rotation, revocation, and reauthorization;
+- validation that the requested Company belongs to the verified organization;
+- issuing a short-lived access-token lease for one request.
 
-The connection-service network protocol and workload-identity mechanism are
-deliberately not selected in this repository. The MCP process never receives
-or stores an Intuit refresh token or client secret and has no deployment-level
-default company.
+The MCP server owns:
 
-## Source layout
+- MCP protocol and HTTP handling;
+- AuthCo resource-token and scope enforcement;
+- tool discovery, schemas, and authority annotations;
+- rejection of model-controlled tenant, connection, realm, or credential data;
+- request-scoped QuickBooks clients and safe result/error conversion.
 
-```text
-src/
-├── index.ts                         # HTTP-only executable
-├── http-config.ts                   # fail-closed static configuration
-├── http-server.ts                   # OAuth + MCP + readiness boundary
-├── auth/                            # token verification and metadata
-├── runtime/
-│   ├── contracts.ts                 # provider ports and execution types
-│   ├── authorization-policy.ts     # claim shape and single-value checks
-│   ├── production-runtime.ts       # provider composition
-├── clients/quickbooks-client.ts    # request-scoped lease/client factory
-├── registry.ts                      # 142 explicit-authority definitions
-├── tools/                           # Zod schemas + dependency-forwarding adapters
-├── handlers/                        # QBO transformations and calls
-└── helpers/register-tool.ts         # authorization, MRTR, ledger orchestration
-```
+The employee/client application owns human approval and work authority. Future
+idempotency, reconciliation, or throttling controls should be designed beside
+the execution owner when the concrete production need is known. They are not
+ports or mandatory dependencies in this MCP repository today.
 
-## Execution context and handlers
+## Runtime seam
 
-`executionContextFromServerContext()` constructs a frozen caller/organization
-context from verified `AuthInfo` claims and OAuth scopes. The lease provider
-resolves connection data only after authorization. Mutation preparation may
-resolve an opaque binding before confirmation; credential material is still
-withheld until an accepted confirmation. Handlers receive
-`QboHandlerDependencies` explicitly from the registered tool callback:
+`QboExecutionLeaseProvider.acquire()` accepts an immutable verified execution
+context and returns temporary QuickBooks material. Refresh tokens and Intuit
+client secrets never cross this port. `RequestScopedQboClientFactory` validates
+lease expiry and constructs a fresh SDK/raw-client pair for the call.
+
+Handlers receive only explicit dependencies:
 
 ```typescript
 type QboHandlerDependencies = Readonly<{
@@ -89,42 +60,30 @@ type QboHandlerDependencies = Readonly<{
 }>;
 ```
 
-Handlers do not read request headers, decode tokens, select companies, accept
-realm IDs, or use tool-controlled credentials. Production registration always
-supplies the explicit third argument; a handler invoked without it fails closed.
+Handlers do not read authorization headers, decode access tokens, select a
+Company, or accept realm IDs and credentials from tool arguments.
 
-## Authority and scopes
+## Source layout
 
-Every registry definition declares exactly one authority: `read`, `write`, or
-`delete`. Name prefixes remain only a consistency assertion and emergency
-registration kill-switch classification. `materializeToolDefinition()` fails
-closed when metadata is absent, unknown, or inconsistent. Public scopes remain
-coarse and compositional: all tools require `quickbooks.read`, writes add
-`quickbooks.write`, and deletes add `quickbooks.delete`.
+```text
+src/
+├── index.ts                         # standalone HTTP entrypoint
+├── http-config.ts                   # fail-closed resource configuration
+├── http-server.ts                   # OAuth, MCP, health, and shutdown boundary
+├── adapters/                        # Finance execution-lease adapter
+├── auth/                            # token verification and metadata
+├── runtime/                         # execution contracts and composition
+├── clients/quickbooks-client.ts     # request-scoped lease/client factory
+├── registry.ts                      # explicit-authority tool definitions
+├── tools/                           # Zod schemas and adapters
+├── handlers/                        # QuickBooks transformations and calls
+└── helpers/register-tool.ts         # authorization and single-lease execution
+```
 
-## Mutation safety
+## Operational consequence
 
-The orchestration layer resolves an opaque trusted connection binding, includes
-it in the canonical keyed HMAC fingerprint, and stores only metadata in the
-injected ledger. MRTR request state binds method, issuer, subject, client,
-organization, connection, tool, and fingerprint. On confirmation, the acquired
-lease must carry the same trusted connection binding before dispatch.
-`prepared → executing` is an atomic claim before dispatch. A dispatch that
-cannot be proven to have completed becomes `unknown`; it is never retried
-automatically. Raw financial input/output is not persisted.
-
-## Remote-safe files and errors
-
-Attachment and PDF tools process only bounded inline bytes. They reject server
-paths, arbitrary URL fetching, and overwrite controls. Error responses and
-operational logs omit provider bodies, credentials, internal URLs, stacks, and
-business payloads.
-
-## Operational consequences
-
-Moving tenancy and credentials to shared infrastructure removes the MCP
-single-company database/bootstrap path, but it does not make the first
-deployment simpler: a connection service, workload identity, durable ledger,
-shared limiter, AuthCo grant contract, and live sandbox validation become
-prerequisites. That trade-off is intentional because tenant ownership and
-long-lived credential custody belong outside the MCP execution process.
+The MCP server intentionally contains no custom operation ledger, application
+rate limiter, or mutation-confirmation state. Consequently, an ambiguous write
+response is not safe to retry automatically. This limitation is documented and
+must be addressed by the owning production execution/control plane before
+unattended financial mutations are enabled.

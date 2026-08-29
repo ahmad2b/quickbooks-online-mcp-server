@@ -12,7 +12,6 @@ import {
 import { z } from "zod";
 import type { ToolDefinition } from "../../../src/types/tool-definition";
 import type { RuntimeServices } from "../../../src/runtime/contracts";
-import { QboExecutionError } from "../../../src/clients/quickbooks-client";
 
 function runtimeServices(): RuntimeServices {
   const qboClientFactory = {
@@ -29,22 +28,8 @@ function runtimeServices(): RuntimeServices {
       close: jest.fn(async () => undefined),
     })),
   } as unknown as RuntimeServices["qboClientFactory"];
-  const qboExecutionLeaseProvider = {
-    resolveConnectionBinding: jest.fn(async () => "test-connection"),
-    acquire: jest.fn(async () => ({
-      leaseId: "test-lease",
-      qboConnectionId: "test-connection",
-      accessToken: "test-access-token",
-      realmId: "test-realm",
-      environment: "sandbox" as const,
-      expiresAt: new Date(Date.now() + 60_000),
-      credentialVersion: "test-credential",
-    })),
-  } as unknown as RuntimeServices["qboExecutionLeaseProvider"];
   return {
     qboClientFactory,
-    qboExecutionLeaseProvider,
-    rateLimiter: {} as RuntimeServices["rateLimiter"],
     authorizationPolicy: {
       authorize: jest.fn(() => ({
         allowed: true as const,
@@ -56,20 +41,6 @@ function runtimeServices(): RuntimeServices {
         },
       })),
     },
-    operationLedger: {
-      prepare: jest.fn(async (operation: { id: string }) => ({
-        created: true,
-        operationId: operation.id,
-        status: "prepared" as const,
-      })),
-      transition: jest.fn(async () => true),
-      recoverStale: jest.fn(async () => 0),
-    },
-    requestStateCodec: {
-      mint: jest.fn(async () => "signed-state"),
-      verify: jest.fn(async () => ({ operationId: "op", toolName: "create_invoice", inputFingerprint: "hash", connectionId: "test-connection" })),
-    },
-    operationFingerprint: { key: new Uint8Array([1, 2, 3]), keyVersion: "test-v1" },
   };
 }
 
@@ -82,8 +53,6 @@ function authContext(overrides: Record<string, unknown> = {}) {
       _meta: {
         [DEVRAFTEL_COMPANY_ID_META_KEY]: "00000000-0000-4000-8000-000000000001",
       },
-      requestState: () => undefined,
-      inputResponses: undefined,
     },
   };
 }
@@ -289,139 +258,49 @@ describe("RegisterTool", () => {
     );
   });
 
-  it("requires signed multi-round-trip confirmation and records mutation outcome", async () => {
+  it.each([
+    ["create_invoice", "write"],
+    ["delete_invoice", "delete"],
+  ] as const)("executes authorized %s tools directly with one request-scoped lease", async (name, authority) => {
     let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
+    let config: { annotations?: Record<string, boolean> } | undefined;
     const server = {
-      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
+      registerTool: jest.fn((_name: string, registeredConfig: typeof config, registered: typeof callback) => {
+        config = registeredConfig;
         callback = registered;
       }),
     };
     const services = runtimeServices();
-    const mutationHandler = jest.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
-    RegisterTool(server, {
-      name: "create_invoice",
-      description: "create",
-      schema,
-      handler: mutationHandler,
-      authority: "write",
-    }, services);
-
-    const first = await callback?.({ id: "123", amount: 10 }, authContext());
-    expect(first.resultType).toBe("input_required");
-    expect(services.operationLedger.prepare).toHaveBeenCalledTimes(1);
-    expect(mutationHandler).not.toHaveBeenCalled();
-
-    const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls[0][0] as { id: string; inputFingerprint: string; connectionId: string };
-    const retry = authContext() as any;
-    retry.mcpReq.requestState = () => ({
-      operationId: prepared.id,
-      toolName: "create_invoice",
-      inputFingerprint: prepared.inputFingerprint,
-      connectionId: prepared.connectionId,
-    });
-    retry.mcpReq.inputResponses = {
-      confirm: { action: "accept", content: { confirm: true } },
-    };
-    const result = await callback?.({ id: "123", amount: 10 }, retry);
-
-    expect(result.content[0].text).toBe("created");
-    expect(mutationHandler).toHaveBeenCalledTimes(1);
-    expect(services.operationLedger.transition).toHaveBeenLastCalledWith(
-      prepared.id,
-      ["executing"],
-      "succeeded",
-    );
-  });
-
-  it("rejects confirmation when the trusted QuickBooks connection changes", async () => {
-    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
-    const server = {
-      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
-        callback = registered;
-      }),
-    };
-    const services = runtimeServices();
-    const mutationHandler = jest.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
-    RegisterTool(server, {
-      name: "create_invoice",
-      description: "create",
-      schema,
-      handler: mutationHandler,
-      authority: "write",
-    }, services);
-
-    const first = await callback?.({ id: "123", amount: 10 }, authContext());
-    expect(first.resultType).toBe("input_required");
-    expect(services.qboExecutionLeaseProvider.resolveConnectionBinding).toHaveBeenCalledTimes(1);
-    expect(services.qboClientFactory.create).not.toHaveBeenCalled();
-
-    const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls[0][0] as {
-      id: string;
-      inputFingerprint: string;
-      connectionId: string;
-    };
     const close = jest.fn(async () => undefined);
     (services.qboClientFactory.create as any).mockResolvedValueOnce({
       qbo: {},
       rawQbo: { accessToken: "access", realmId: "realm", environment: "sandbox" },
-      qboConnectionId: "different-connection",
-      leaseId: "lease-different",
+      qboConnectionId: "connection",
+      leaseId: "lease",
       expiresAt: new Date(Date.now() + 60_000),
       close,
     });
-    const retry = authContext() as any;
-    retry.mcpReq.requestState = () => ({
-      operationId: prepared.id,
-      toolName: "create_invoice",
-      inputFingerprint: prepared.inputFingerprint,
-      connectionId: prepared.connectionId,
-    });
-    retry.mcpReq.inputResponses = {
-      confirm: { action: "accept", content: { confirm: true } },
-    };
-    const result = await callback?.({ id: "123", amount: 10 }, retry);
-
-    expect(result).toMatchObject({
-      isError: true,
-      _meta: { errorCode: "QBO_EXECUTION_LEASE_INVALID" },
-    });
-    expect(close).toHaveBeenCalledTimes(1);
-    expect(mutationHandler).not.toHaveBeenCalled();
-    expect(services.operationLedger.transition).toHaveBeenCalledWith(
-      prepared.id,
-      ["executing"],
-      "failed",
-    );
-  });
-
-  it("blocks a duplicate unresolved mutation before requesting confirmation", async () => {
-    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
-    const server = {
-      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
-        callback = registered;
-      }),
-    };
-    const services = runtimeServices();
-    (services.operationLedger.prepare as any).mockResolvedValue({
-      created: false,
-      operationId: "existing-operation",
-      status: "unknown",
-    });
-    const mutationHandler = jest.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    const mutationHandler = jest.fn(async () => ({ content: [{ type: "text", text: "completed" }] }));
     RegisterTool(server, {
-      name: "create_invoice",
-      description: "create",
+      name,
+      description: name,
       schema,
       handler: mutationHandler,
-      authority: "write",
+      authority,
     }, services);
 
     const result = await callback?.({ id: "123" }, authContext());
 
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("existing-operation");
-    expect(mutationHandler).not.toHaveBeenCalled();
-    expect(services.requestStateCodec.mint).not.toHaveBeenCalled();
+    expect(result.content[0].text).toBe("completed");
+    expect(config?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    });
+    expect(services.qboClientFactory.create).toHaveBeenCalledTimes(1);
+    expect(mutationHandler).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it("rejects unsupported servers and honors disable policy before registration", () => {
@@ -511,167 +390,5 @@ describe("RegisterTool", () => {
     });
   });
 
-  it("fails closed when mutation fingerprinting is not configured", async () => {
-    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
-    const server = {
-      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
-        callback = registered;
-      }),
-    };
-    const services = runtimeServices();
-    services.operationFingerprint.key = new Uint8Array();
-    RegisterTool(server, def("create_invoice"), services);
 
-    const result = await callback?.({ id: "123", amount: 10 }, authContext());
-
-    expect(result).toMatchObject({ isError: true, _meta: { errorCode: "MCP_TOOL_NOT_AUTHORIZED" } });
-    expect(services.operationLedger.prepare).not.toHaveBeenCalled();
-  });
-
-  it("fails closed when preparing a mutation ledger record fails", async () => {
-    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
-    const server = {
-      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
-        callback = registered;
-      }),
-    };
-    const services = runtimeServices();
-    (services.operationLedger.prepare as any).mockRejectedValueOnce(new Error("ledger unavailable"));
-    RegisterTool(server, def("create_invoice"), services);
-
-    const result = await callback?.({ id: "123" }, authContext());
-
-    expect(result).toMatchObject({ isError: true, _meta: { errorCode: "QBO_OPERATION_LEDGER_UNAVAILABLE" } });
-    expect(services.requestStateCodec.mint).not.toHaveBeenCalled();
-  });
-
-  it("fails closed and marks prepared when confirmation state cannot be minted", async () => {
-    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
-    const server = {
-      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
-        callback = registered;
-      }),
-    };
-    const services = runtimeServices();
-    (services.requestStateCodec.mint as any).mockRejectedValueOnce(new Error("signer unavailable"));
-    (services.operationLedger.transition as any).mockRejectedValueOnce(new Error("ledger unavailable"));
-    RegisterTool(server, def("create_invoice"), services);
-
-    const result = await callback?.({ id: "123" }, authContext());
-
-    expect(result).toMatchObject({ isError: true, _meta: { errorCode: "QBO_OPERATION_LEDGER_UNAVAILABLE" } });
-    expect(services.operationLedger.transition).toHaveBeenCalledWith(
-      expect.any(String),
-      ["prepared"],
-      "failed",
-    );
-  });
-
-  it("rejects confirmation for a different operation and declined confirmation", async () => {
-    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
-    const server = {
-      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
-        callback = registered;
-      }),
-    };
-    const services = runtimeServices();
-    RegisterTool(server, def("create_invoice"), services);
-
-    const mismatchContext = authContext() as any;
-    mismatchContext.mcpReq.requestState = () => ({
-      operationId: "op",
-      toolName: "create_other",
-      inputFingerprint: "different",
-    });
-    const mismatch = await callback?.({ id: "123" }, mismatchContext);
-    expect(mismatch).toMatchObject({ isError: true, _meta: { errorCode: "MCP_TOOL_NOT_AUTHORIZED" } });
-
-    await callback?.({ id: "123" }, authContext());
-    const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls.at(-1)?.[0] as {
-      id: string;
-      inputFingerprint: string;
-      connectionId: string;
-    };
-    const declinedContext = authContext() as any;
-    declinedContext.mcpReq.requestState = () => ({
-      operationId: prepared.id,
-      toolName: "create_invoice",
-      inputFingerprint: prepared.inputFingerprint,
-      connectionId: prepared.connectionId,
-    });
-    declinedContext.mcpReq.inputResponses = {
-      confirm: { action: "decline", content: { confirm: false } },
-    };
-    const declined = await callback?.({ id: "123" }, declinedContext);
-    expect(declined).toMatchObject({ isError: true, _meta: { errorCode: "MCP_MUTATION_NOT_CONFIRMED" } });
-  });
-
-  it("blocks ledger claim failures and records QBO lease failures as unknown", async () => {
-    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
-    const server = {
-      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
-        callback = registered;
-      }),
-    };
-    const services = runtimeServices();
-    RegisterTool(server, def("create_invoice"), services);
-    await callback?.({ id: "123" }, authContext());
-    const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls.at(-1)?.[0] as {
-      id: string;
-      inputFingerprint: string;
-      connectionId: string;
-    };
-    const state = { operationId: prepared.id, toolName: "create_invoice", inputFingerprint: prepared.inputFingerprint, connectionId: prepared.connectionId };
-    const claimedContext = authContext() as any;
-    claimedContext.mcpReq.requestState = () => state;
-    claimedContext.mcpReq.inputResponses = {
-      confirm: { action: "accept", content: { confirm: true } },
-    };
-    (services.operationLedger.transition as any).mockRejectedValueOnce(new Error("ledger timeout"));
-    const blocked = await callback?.({ id: "123" }, claimedContext);
-    expect(blocked).toMatchObject({ isError: true, _meta: { errorCode: "QBO_OPERATION_LEDGER_UNAVAILABLE" } });
-
-    (services.operationLedger.transition as any).mockReset();
-    (services.operationLedger.transition as any).mockResolvedValue(true);
-    (services.qboClientFactory.create as any).mockRejectedValueOnce(
-      new QboExecutionError("QBO_EXECUTION_LEASE_UNAVAILABLE", "lease unavailable"),
-    );
-    const failedLease = await callback?.({ id: "123" }, claimedContext);
-    expect(failedLease).toMatchObject({ isError: true, _meta: { errorCode: "QBO_EXECUTION_LEASE_UNAVAILABLE" } });
-    expect(services.operationLedger.transition).toHaveBeenCalledWith(prepared.id, ["executing"], "unknown");
-  });
-
-  it("returns an unknown outcome for generic dispatch failures and tolerates final ledger failure", async () => {
-    let callback: ((input: unknown, context: unknown) => Promise<any>) | undefined;
-    const server = {
-      registerTool: jest.fn((_name: string, _config: unknown, registered: typeof callback) => {
-        callback = registered;
-      }),
-    };
-    const services = runtimeServices();
-    const mutationHandler = jest.fn(async () => { throw new Error("transport failed"); });
-    RegisterTool(server, { ...def("create_invoice"), handler: mutationHandler }, services);
-    await callback?.({ id: "123" }, authContext());
-    const prepared = (services.operationLedger.prepare as jest.Mock).mock.calls.at(-1)?.[0] as {
-      id: string;
-      inputFingerprint: string;
-      connectionId: string;
-    };
-    const context = authContext() as any;
-    context.mcpReq.requestState = () => ({
-      operationId: prepared.id,
-      toolName: "create_invoice",
-      inputFingerprint: prepared.inputFingerprint,
-      connectionId: prepared.connectionId,
-    });
-    context.mcpReq.inputResponses = {
-      confirm: { action: "accept", content: { confirm: true } },
-    };
-    (services.operationLedger.transition as any).mockResolvedValueOnce(true).mockRejectedValueOnce(new Error("ledger down"));
-    const result = await callback?.({ id: "123" }, context);
-
-    expect(result).toMatchObject({ isError: true, _meta: { errorCode: "QBO_OPERATION_OUTCOME_UNKNOWN" } });
-    expect(result.content[0].text).toContain(`Reconcile operation ${prepared.id}`);
-    expect(mutationHandler).toHaveBeenCalledTimes(1);
-  });
 });

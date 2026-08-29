@@ -1,110 +1,84 @@
 # Production Streamable HTTP
 
-The server exposes only MCP `2026-07-28` at `POST /mcp`. It rejects stdio,
-legacy protocol versions, the initialization lifecycle, HTTP+SSE, general GET
-event streams, and MCP session state. `legacy: "reject"` is configured in the
-official TypeScript SDK v2 handler.
+The server exposes MCP `2026-07-28` at `POST /mcp` using the official
+TypeScript SDK v2 handler. It rejects stdio, legacy protocol versions, the
+initialization lifecycle, general GET event streams, and MCP session state.
 
 ## Runtime ownership
 
-DevRaftel control-plane infrastructure owns organizations, membership,
-connection selection, Intuit OAuth exchange, refresh-token storage and
-rotation, revocation, and reauthorization state. This MCP resource server
-verifies a resource-bound access token and extracts one configured organization
-claim. Agent runtime code selects a Company through the namespaced per-call MCP
-metadata key `com.devraftel.finance/company_id`. That value remains only a
-resource selector: it is never accepted as model tool input, and Finance must
-verify that the Company belongs to the verified organization before resolving
-an active QuickBooks connection.
+Finance owns organizations, Company-to-QuickBooks connection mapping, Intuit
+OAuth exchange, refresh-token storage and rotation, revocation, and
+reauthorization state. The MCP server owns the remote tool interface and
+request-scoped QuickBooks execution only.
 
-After authorization, the runtime creates an immutable `ExecutionContext` and
-requests one short-lived execution lease from the injected
-`QboExecutionLeaseProvider`. The lease contains an access token, realm ID,
-environment, credential version, connection ID, expiry, and lease ID; it never
-contains a refresh token or client secret. The request-scoped
-`QboClientFactory` constructs a fresh `node-quickbooks` client and releases it
-after the call. No client, token, realm, or connection is process-global.
+For each tool call, the MCP server:
 
-`FinanceExecutionLeaseProvider` implements the connection-service port over
-private HTTP. It authenticates with a dedicated workload bearer token, performs
-one credential-free binding lookup before mutation confirmation, and performs
-one credential-bearing lease lookup only when a tool is ready to execute. It
-uses no retries or cache and strictly checks organization, Company, environment,
-expiry, and response shape. The same concrete adapter does not yet exist for the
-durable operation ledger and shared rate limiter.
+1. verifies the resource-bound AuthCo token, scopes, and single organization;
+2. reads the Company selector from trusted per-call metadata at
+   `com.devraftel.finance/company_id`;
+3. rejects organization, Company, connection, realm, environment, credential,
+   and server-file routing values supplied as model tool arguments;
+4. requests one short-lived execution lease from Finance;
+5. validates the lease organization, Company, environment, expiry, and shape;
+6. creates a fresh request-scoped QuickBooks client, invokes the tool, and
+   releases request references.
+
+The Finance lease response may contain a temporary access token, realm ID,
+connection ID, environment, expiry, credential version, and lease ID. It must
+never contain an Intuit refresh token or client secret. No QuickBooks client,
+access token, realm, or connection is process-global.
 
 ## Authorization and scopes
 
-Configure the exact MCP resource URI and OAuth issuer. Tokens must have that
-resource as audience, a subject and OAuth client identity, expiry/not-before,
-and exactly one non-empty organization claim. AuthCo provides the namespaced
-DevRaftel organization claim.
-
 Every tool requires `quickbooks.read`. Write/update tools additionally require
-`quickbooks.write`; delete tools require `quickbooks.delete`. The tool registry
-requires explicit `read`, `write`, or `delete` authority metadata and direct
-`tools/call` authorization is enforced even if a tool is hidden from discovery.
+`quickbooks.write`; delete tools require `quickbooks.delete`. Tool definitions
+retain explicit read/write/delete authority and MCP risk annotations.
 
-## Mutation safety
+AuthCo authorization is technical permission to call an MCP tool. Product
+supervision and human approval for financial mutations belong to the employee
+and client application, not this MCP server.
 
-Every mutation first performs a trusted opaque connection-binding lookup and
-returns MCP `input_required`; it does not acquire credential-bearing lease
-material or call QuickBooks. The request state is signed, expires after ten
-minutes, and binds method, issuer, subject, client, organization, connection,
-tool, and a keyed input fingerprint. The durable
-operation ledger records only metadata and atomically claims
-`prepared → executing` before dispatch. Outcomes are `succeeded`, `failed`, or
-`unknown`; an ambiguous operation must be reconciled before retrying.
+## Deliberately deferred controls
 
-After confirmation, the execution lease must contain the same trusted
-connection binding recorded in the request state and ledger. A changed or
-malformed binding fails before the handler or QuickBooks client is dispatched.
+This v1 MCP layer has no custom application-level rate limiter, mutation
+ledger, duplicate-write protection, or MCP-side confirmation flow. These are
+not mandatory MCP protocol features.
 
-The input fingerprint is a keyed HMAC with an explicit key version. Raw input,
-output, credentials, and provider response bodies are not stored in ledger or
-rate-limit records. Ledger unavailability blocks mutations. A declined
-confirmation makes no credential-bearing lease or QuickBooks call.
+A write may have succeeded in QuickBooks even when its HTTP response is lost.
+Callers must not blindly retry an ambiguous mutation. Before production writes,
+idempotency, reconciliation, supervision, and any service-level throttling must
+be designed in the system that owns execution at that time—preferably Finance
+or deployment gateway infrastructure. QuickBooks/provider throttling responses
+still surface through normal tool errors.
 
 ## Files and errors
 
-Remote tools accept bounded inline attachment/PDF bytes only. They do not
-accept `file_path`, `output_path`, `overwrite`, or arbitrary server-side URL
-fetches. Inline attachments and PDFs are capped at 2 MiB; larger artifacts
-require a future private resource-link/object-store adapter.
-
-Errors are redacted and contain no raw provider bodies, internal URLs, tokens,
-stack traces, or database details. Logs and traces contain metadata-only
-request identifiers and hashed principal identifiers.
+Remote tools accept bounded inline attachment/PDF bytes only. They reject
+server file paths, overwrite controls, and arbitrary server-side URL fetching.
+Errors and logs omit provider bodies, credentials, internal URLs, stack traces,
+and business payloads.
 
 ## Configuration
 
-Copy `.env.example`. Required values include:
+Copy `.env.example`. Required values are:
 
-- exact `MCP_RESOURCE_URI`, HTTPS host/origin allowlists, and MCP limits;
-- OAuth issuer, metadata URL, and authenticated introspection credentials;
-- `MCP_AUTH_ORGANIZATION_CLAIM` (the AuthCo value is
-  `https://devraftel.com/organization_id`);
-- independent 32-byte request-state and operation-fingerprint keys;
-- `QBO_EXECUTION_LEASE_PROVIDER=finance-http` plus
-  `FINANCE_QUICKBOOKS_INTERNAL_URL`, the dedicated
-  `FINANCE_QUICKBOOKS_WORKLOAD_TOKEN`, `FINANCE_QUICKBOOKS_ENVIRONMENT`, and a
-  bounded `FINANCE_QUICKBOOKS_TIMEOUT_MS`;
-- deployment-supplied durable ledger, shared rate-limit, and workload-identity
-  adapter references.
+- `MCP_RESOURCE_URI`, host/origin allowlists, body limit, and request timeout;
+- AuthCo issuer, metadata URL, introspection URL and confidential introspection
+  client credentials;
+- `MCP_AUTH_ORGANIZATION_CLAIM`;
+- `QBO_EXECUTION_LEASE_PROVIDER=finance-http`;
+- `FINANCE_QUICKBOOKS_INTERNAL_URL`;
+- the dedicated `FINANCE_QUICKBOOKS_WORKLOAD_TOKEN`;
+- `FINANCE_QUICKBOOKS_ENVIRONMENT` and a bounded timeout.
 
-The runtime must not be configured with `DATABASE_URL`, an MCP encryption key,
-deployment `QUICKBOOKS_CONNECTION_ID`, Intuit client credentials, a realm ID,
-or an Intuit refresh token. Provider implementations may use their own
-deployment configuration outside this repository.
+Do not configure this process with an Intuit client secret, refresh token,
+realm ID, deployment-wide QuickBooks connection, database URL, ledger, or
+rate-limiter provider.
 
-## Deployment gates
+## Validation still required
 
-Before customer traffic, verify build, lint, tests, MCP conformance, real
-AuthCo issuance/revocation, authenticated workload identity, at least two MCP
-replicas, a dedicated Intuit sandbox, concurrent lease acquisition, provider
-timeouts, worker loss during reads and mutations, and operation reconciliation.
-
-Focused unit tests prove the in-process seam and handler transformations; they
-do not prove live provider authentication, multi-replica isolation, or
-QuickBooks sandbox behavior. AuthCo CIMD/client-resource authorization and the
-versioned connection-service contract remain external integration gates.
+Local build and tests do not prove live integration. Before deployment, verify
+real AuthCo token issuance/introspection and revocation, Finance workload
+authentication, organization/Company rejection, sandbox lease acquisition, at
+least one read tool, one mutation tool using non-customer sandbox data, token
+refresh through Finance, and redacted failure behavior.
