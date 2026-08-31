@@ -7,6 +7,7 @@ import {
   isJsonContentType,
   OAuthError,
   OAuthErrorCode,
+  type AuthInfo,
   type McpHttpHandler,
   type McpServerFactory,
   type OAuthMetadata,
@@ -22,6 +23,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import {
   scopeForAuthority,
   hasForbiddenExecutionField,
+  organizationIdFromMeta,
   FORBIDDEN_EXECUTION_INPUT_MESSAGE,
 } from "./helpers/register-tool.js";
 import {
@@ -45,6 +47,7 @@ type RequestBody = {
   params?: {
     name?: unknown;
     arguments?: unknown;
+    _meta?: unknown;
   };
 };
 
@@ -224,6 +227,43 @@ async function sendFetchResponse(res: Response, response: globalThis.Response): 
   response.headers.forEach((value, key) => res.setHeader(key, value));
   const body = await response.text();
   if (!res.headersSent) res.status(response.status).send(body);
+}
+
+const TEMPORARY_UNAUTHENTICATED_CLIENT_ID = "temporary-unauthenticated-mcp";
+const TEMPORARY_UNAUTHENTICATED_SUBJECT = "temporary-unauthenticated-caller";
+
+function temporaryAuthInfo(req: Request, config: HttpConfig): AuthInfo {
+  const organizationId = organizationIdFromMeta(bodyOf(req).params?._meta);
+  const claims: Record<string, unknown> = {
+    iss: config.authIssuer,
+    sub: TEMPORARY_UNAUTHENTICATED_SUBJECT,
+    client_id: TEMPORARY_UNAUTHENTICATED_CLIENT_ID,
+    ...(organizationId ? { [config.authOrganizationClaim]: organizationId } : {}),
+  };
+  return {
+    token: TEMPORARY_UNAUTHENTICATED_CLIENT_ID,
+    clientId: TEMPORARY_UNAUTHENTICATED_CLIENT_ID,
+    scopes: [...QUICKBOOKS_SCOPES],
+    expiresAt: Math.floor(Date.now() / 1_000) + 300,
+    resource: config.resourceUri,
+    extra: { claims },
+  };
+}
+
+/**
+ * TEMPORARY sandbox-only replacement for the outer MCP bearer gate.
+ * Organization is accepted from per-call metadata; company metadata is
+ * validated later at the immutable execution-context seam.
+ */
+export function makeTemporaryUnauthenticatedMiddleware(config: HttpConfig) {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    req.auth = temporaryAuthInfo(req, config);
+    next();
+  };
+}
+
+function passThrough(_req: Request, _res: Response, next: NextFunction): void {
+  next();
 }
 
 function makeScopeMiddleware(
@@ -440,13 +480,17 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
   app.get("/readyz", health);
   app.get("/healthz", health);
 
-  const bearer = requireBearerAuth({
-    verifier: tokenVerifier,
-    requiredScopes: ["quickbooks.read"],
-    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.config.resourceUri),
-  });
+  const authenticate = options.config.temporaryUnauthenticatedMode
+    ? makeTemporaryUnauthenticatedMiddleware(options.config)
+    : requireBearerAuth({
+        verifier: tokenVerifier,
+        requiredScopes: ["quickbooks.read"],
+        resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.config.resourceUri),
+      });
   const scope = makeScopeMiddleware(options.config, toolAuthority);
-  const organizationBinding = makeOrganizationBindingMiddleware(options.config, options.services);
+  const organizationBinding = options.config.temporaryUnauthenticatedMode
+    ? passThrough
+    : makeOrganizationBindingMiddleware(options.config, options.services);
   const executionInput = makeExecutionInputMiddleware();
   const nodeHandler = toNodeHandler(handler, {
     onerror: (error) => {
@@ -482,7 +526,7 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
       state.inFlight = Math.max(0, state.inFlight - 1);
     });
     next();
-  }, bearer, organizationBinding, executionInput, scope, async (req: Request, res: Response, next: NextFunction) => {
+  }, authenticate, organizationBinding, executionInput, scope, async (req: Request, res: Response, next: NextFunction) => {
     try {
       await nodeHandler(req, res, req.body);
     } catch (error) {

@@ -10,9 +10,17 @@ import {
 } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { ClaimBindingAuthorizationPolicy } from "../../src/runtime/authorization-policy";
-import { createHttpApp, makeExecutionInputMiddleware } from "../../src/http-server";
+import {
+  createHttpApp,
+  makeExecutionInputMiddleware,
+  makeTemporaryUnauthenticatedMiddleware,
+} from "../../src/http-server";
 import { OAuthAccessTokenVerifier } from "../../src/auth/oauth-access-token-verifier";
-import { DEVRAFTEL_COMPANY_ID_META_KEY, RegisterTool } from "../../src/helpers/register-tool";
+import {
+  DEVRAFTEL_COMPANY_ID_META_KEY,
+  DEVRAFTEL_ORGANIZATION_ID_META_KEY,
+  RegisterTool,
+} from "../../src/helpers/register-tool";
 import type {
   ExecutionContext,
   QboClientLease,
@@ -47,6 +55,7 @@ type QboCall = {
 
 type Harness = {
   app: ReturnType<typeof createHttpApp>;
+  config: HttpConfig;
   leaseCreate: jest.MockedFunction<(execution: ExecutionContext) => Promise<QboClientLease>>;
   qboCalls: QboCall[];
   verifyAccessToken: jest.MockedFunction<(token: string) => Promise<AuthInfo>>;
@@ -62,7 +71,7 @@ const oauthMetadata: OAuthMetadata = {
   scopes_supported: ["quickbooks.read", "quickbooks.write", "quickbooks.delete"],
 };
 
-function config(): HttpConfig {
+function config(overrides: Partial<HttpConfig> = {}): HttpConfig {
   return {
     resourceUri: new URL(RESOURCE),
     authIssuer: ISSUER,
@@ -77,7 +86,9 @@ function config(): HttpConfig {
     bodyLimit: "1mb",
     requestTimeoutMs: 2_000,
     authOrganizationClaim: ORGANIZATION_CLAIM,
+    temporaryUnauthenticatedMode: false,
     qboExecutionLeaseProvider: "test-lease-provider",
+    ...overrides,
   };
 }
 
@@ -103,7 +114,9 @@ function tokenInfo(token: FakeToken): AuthInfo {
   };
 }
 
-function makeHarness(options: { leaseError?: Error } = {}): Harness {
+function makeHarness(
+  options: { leaseError?: Error; temporaryUnauthenticatedMode?: boolean } = {},
+): Harness {
   const qboCalls: QboCall[] = [];
   const leaseCreate = jest.fn(async (execution: ExecutionContext): Promise<QboClientLease> => {
     if (options.leaseError) throw options.leaseError;
@@ -183,8 +196,11 @@ function makeHarness(options: { leaseError?: Error } = {}): Harness {
     RegisterTool(server, writeDefinition, services);
     return server;
   };
+  const httpConfig = config({
+    temporaryUnauthenticatedMode: options.temporaryUnauthenticatedMode ?? false,
+  });
   const app = createHttpApp({
-    config: config(),
+    config: httpConfig,
     oauthMetadata,
     tokenVerifier: { verifyAccessToken },
     serverFactory,
@@ -192,7 +208,7 @@ function makeHarness(options: { leaseError?: Error } = {}): Harness {
     toolAuthority: (name: string) => name === "get_probe" ? "read" : name === "create_probe" ? "write" : undefined,
     logger: () => undefined,
   });
-  return { app, leaseCreate, qboCalls, verifyAccessToken };
+  return { app, config: httpConfig, leaseCreate, qboCalls, verifyAccessToken };
 }
 
 async function post(harness: Harness, token: string, body: unknown): Promise<{ status: number; body: Record<string, any> }> {
@@ -212,6 +228,39 @@ async function post(harness: Harness, token: string, body: unknown): Promise<{ s
       body: JSON.stringify(body),
     }),
     { authInfo },
+  );
+  return { status: response.status, body: await response.json() as Record<string, any> };
+}
+
+async function postWithoutAuth(
+  harness: Harness,
+  body: unknown,
+): Promise<{ status: number; body: Record<string, any> }> {
+  const requestWithAuth: { body: unknown; auth?: AuthInfo } = { body };
+  let continued = false;
+  makeTemporaryUnauthenticatedMiddleware(harness.config)(
+    requestWithAuth as never,
+    {} as never,
+    () => { continued = true; },
+  );
+  if (!continued || !requestWithAuth.auth) {
+    throw new Error("temporary unauthenticated middleware did not create request context");
+  }
+  const response = await harness.app.handler.fetch(
+    new Request(RESOURCE, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": body && typeof body === "object" && "params" in body
+          ? String((body as { params?: { name?: unknown } }).params?.name ?? "")
+          : "",
+      },
+      body: JSON.stringify(body),
+    }),
+    { authInfo: requestWithAuth.auth },
   );
   return { status: response.status, body: await response.json() as Record<string, any> };
 }
@@ -375,6 +424,52 @@ describe("authenticated HTTP execution seam", () => {
     expect(response.body.result?.content?.[0]?.text).toContain("unavailable");
     expect(response.body.result?.content?.[0]?.text).not.toContain("private broker");
     expect(harness.qboCalls).toHaveLength(0);
+  });
+});
+
+describe("temporary unauthenticated sandbox execution seam", () => {
+  it("uses organization and company metadata without calling the bearer verifier", async () => {
+    const harness = makeHarness({ temporaryUnauthenticatedMode: true });
+    const body = callBody("create_probe");
+    const metadata: Partial<Record<string, unknown>> = body.params._meta;
+    metadata[DEVRAFTEL_ORGANIZATION_ID_META_KEY] = "organization-from-metadata";
+
+    const response = await postWithoutAuth(harness, body);
+
+    expect(response.status).toBe(200);
+    expect(response.body.result?.isError).not.toBe(true);
+    expect(harness.verifyAccessToken).not.toHaveBeenCalled();
+    expect(harness.leaseCreate).toHaveBeenCalledTimes(1);
+    expect(harness.leaseCreate.mock.calls[0]?.[0]).toMatchObject({
+      organizationId: "organization-from-metadata",
+      companyId: COMPANY_A,
+      issuer: ISSUER,
+      subjectId: "temporary-unauthenticated-caller",
+      oauthClientId: "temporary-unauthenticated-mcp",
+    });
+    expect([...harness.leaseCreate.mock.calls[0]![0].scopes].sort()).toEqual([
+      "quickbooks.delete",
+      "quickbooks.read",
+      "quickbooks.write",
+    ]);
+  });
+
+  it("fails closed without valid organization or company metadata", async () => {
+    const harness = makeHarness({ temporaryUnauthenticatedMode: true });
+    const missingOrganization = callBody("get_probe");
+    const missingCompany = callBody("get_probe", "missing-company");
+    const metadata: Partial<Record<string, unknown>> = missingCompany.params._meta;
+    metadata[DEVRAFTEL_ORGANIZATION_ID_META_KEY] = "organization-from-metadata";
+    delete metadata[DEVRAFTEL_COMPANY_ID_META_KEY];
+
+    const [organizationResponse, companyResponse] = await Promise.all([
+      postWithoutAuth(harness, missingOrganization),
+      postWithoutAuth(harness, missingCompany),
+    ]);
+
+    expect(organizationResponse.body.result?.isError).toBe(true);
+    expect(companyResponse.body.result?.isError).toBe(true);
+    expect(harness.leaseCreate).not.toHaveBeenCalled();
   });
 });
 

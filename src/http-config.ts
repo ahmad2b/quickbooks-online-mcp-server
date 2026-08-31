@@ -20,6 +20,8 @@ export type HttpConfig = {
   bodyLimit: string;
   requestTimeoutMs: number;
   authOrganizationClaim: string;
+  /** TEMPORARY sandbox-only escape hatch. Defaults off. */
+  temporaryUnauthenticatedMode: boolean;
   /** Opaque adapter references; transport is selected by DevRaftel deployment. */
   qboExecutionLeaseProvider: string;
 };
@@ -35,6 +37,15 @@ function required(env: NodeJS.ProcessEnv, name: string, errors: string[]): strin
   const value = env[name]?.trim();
   if (!value) errors.push(name);
   return value || undefined;
+}
+
+function parseBoolean(env: NodeJS.ProcessEnv, name: string, fallback: boolean, errors: string[]): boolean {
+  const raw = env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  errors.push(name);
+  return fallback;
 }
 
 function parsePositiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number, errors: string[]): number {
@@ -140,6 +151,18 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
   const bodyLimit = env.MCP_BODY_LIMIT?.trim() || "1mb";
   const requestTimeoutMs = parsePositiveInt(env, "MCP_REQUEST_TIMEOUT_MS", 30_000, errors);
   const authOrganizationClaim = required(env, "MCP_AUTH_ORGANIZATION_CLAIM", errors);
+  const temporaryUnauthenticatedMode = parseBoolean(
+    env,
+    "MCP_TEMPORARY_UNAUTHENTICATED_MODE",
+    false,
+    errors,
+  );
+  if (
+    temporaryUnauthenticatedMode &&
+    env.FINANCE_QUICKBOOKS_ENVIRONMENT?.trim().toLowerCase() !== "sandbox"
+  ) {
+    errors.push("FINANCE_QUICKBOOKS_ENVIRONMENT");
+  }
   const qboExecutionLeaseProvider = required(env, "QBO_EXECUTION_LEASE_PROVIDER", errors);
   if (
     errors.length > 0 ||
@@ -169,6 +192,7 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     bodyLimit,
     requestTimeoutMs,
     authOrganizationClaim,
+    temporaryUnauthenticatedMode,
     qboExecutionLeaseProvider,
   };
 }

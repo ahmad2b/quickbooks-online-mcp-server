@@ -71,6 +71,16 @@ Copy `.env.example`. Required values are:
 - the dedicated `FINANCE_QUICKBOOKS_WORKLOAD_TOKEN`;
 - `FINANCE_QUICKBOOKS_ENVIRONMENT` and a bounded timeout.
 
+A temporary sandbox-only escape hatch exists for the current integration
+window: `MCP_TEMPORARY_UNAUTHENTICATED_MODE=true`. In that mode the public
+MCP bearer gate is skipped, all registered tools retain their existing
+behavior, and each tool call must supply
+`com.devraftel.finance/organization_id` and
+`com.devraftel.finance/company_id` metadata. The Finance workload bearer and
+server-side QuickBooks execution-lease flow remain required. The flag defaults
+to `false` and startup rejects it unless
+`FINANCE_QUICKBOOKS_ENVIRONMENT=sandbox`.
+
 Do not configure this process with an Intuit client secret, refresh token,
 realm ID, deployment-wide QuickBooks connection, database URL, ledger, or
 rate-limiter provider.

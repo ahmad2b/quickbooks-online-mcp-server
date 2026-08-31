@@ -67,6 +67,8 @@ const FORBIDDEN_EXECUTION_KEYS = new Set([
 export const FORBIDDEN_EXECUTION_INPUT_MESSAGE =
   "Organization, company, connection, realm, environment, credential, and server-file fields are not accepted as tool input.";
 
+export const DEVRAFTEL_ORGANIZATION_ID_META_KEY =
+  "com.devraftel.finance/organization_id";
 export const DEVRAFTEL_COMPANY_ID_META_KEY = "com.devraftel.finance/company_id";
 const CANONICAL_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -159,11 +161,32 @@ function claimsFromContext(context: ServerContext): Readonly<Record<string, unkn
     : {};
 }
 
-/** Read the Company selector injected by trusted client runtime code. */
-export function companyIdFromServerContext(context: ServerContext): string | undefined {
-  const meta = context.mcpReq?._meta;
+function metadataValue(meta: unknown, key: string): unknown {
   if (!meta || typeof meta !== "object" || Array.isArray(meta)) return undefined;
-  const raw = (meta as Record<string, unknown>)[DEVRAFTEL_COMPANY_ID_META_KEY];
+  return (meta as Record<string, unknown>)[key];
+}
+
+/**
+ * TEMPORARY unauthenticated-mode organization selector. It is transport
+ * metadata, not model-visible tool input, and Finance remains the authority
+ * that resolves whether the organization/company has an active connection.
+ */
+export function organizationIdFromMeta(meta: unknown): string | undefined {
+  const raw = metadataValue(meta, DEVRAFTEL_ORGANIZATION_ID_META_KEY);
+  if (
+    typeof raw !== "string" ||
+    raw !== raw.trim() ||
+    raw.length === 0 ||
+    raw.length > 256
+  ) {
+    return undefined;
+  }
+  return raw;
+}
+
+/** Read the Company selector injected by client runtime code. */
+export function companyIdFromServerContext(context: ServerContext): string | undefined {
+  const raw = metadataValue(context.mcpReq?._meta, DEVRAFTEL_COMPANY_ID_META_KEY);
   if (typeof raw !== "string" || raw !== raw.trim()) return undefined;
   const normalized = raw.toLowerCase();
   return CANONICAL_UUID_PATTERN.test(normalized) ? normalized : undefined;
