@@ -115,6 +115,7 @@ function requestBody(
       subject_id: context.subjectId,
       oauth_client_id: context.oauthClientId,
       scopes: [...context.scopes].sort(),
+      ...(context.agentId ? { agent_id: context.agentId } : {}),
     },
   };
 }

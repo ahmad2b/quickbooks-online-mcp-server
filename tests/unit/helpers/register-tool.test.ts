@@ -12,6 +12,12 @@ import {
 import { z } from "zod";
 import type { ToolDefinition } from "../../../src/types/tool-definition";
 import type { RuntimeServices } from "../../../src/runtime/contracts";
+import {
+  AGENT_ID_CLAIM,
+  ClaimBindingAuthorizationPolicy,
+  QUICKBOOKS_ENVIRONMENT_CLAIM,
+  STAFF_ACCOUNTANT_AGENT_BRIDGE_CLIENT_ID,
+} from "../../../src/runtime/authorization-policy";
 
 function runtimeServices(): RuntimeServices {
   const qboClientFactory = {
@@ -77,6 +83,31 @@ describe("getCrudCategory", () => {
 });
 
 describe("authority metadata", () => {
+  it("accepts a Staff Accountant bearer without a company claim", () => {
+    const policy = new ClaimBindingAuthorizationPolicy({
+      issuer: "https://issuer",
+      organizationClaim: "organization_id",
+    });
+    const decision = policy.authorize({
+      iss: "https://issuer",
+      sub: "owner",
+      client_id: STAFF_ACCOUNTANT_AGENT_BRIDGE_CLIENT_ID,
+      organization_id: "org",
+      [AGENT_ID_CLAIM]: "agent-1",
+      [QUICKBOOKS_ENVIRONMENT_CLAIM]: "sandbox",
+    });
+
+    expect(decision).toMatchObject({
+      allowed: true,
+      identity: {
+        agentId: "agent-1",
+        environment: "sandbox",
+        organizationId: "org",
+      },
+    });
+    if (decision.allowed) expect(decision.identity.companyId).toBeUndefined();
+  });
+
   it("classifies every supported authority prefix and rejects unknown names", () => {
     expect(getToolAuthority("get_invoice")).toBe("read");
     expect(getToolAuthority("read_invoice")).toBe("read");

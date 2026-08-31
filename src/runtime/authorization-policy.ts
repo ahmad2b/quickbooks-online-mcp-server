@@ -4,6 +4,14 @@ import type {
   CallerIdentity,
 } from "./contracts.js";
 
+export const STAFF_ACCOUNTANT_AGENT_BRIDGE_CLIENT_ID =
+  "staff-accountant-agent-bridge";
+export const AGENT_ID_CLAIM = "https://devraftel.com/agent_id";
+/** @deprecated Company selection is supplied as trusted per-call metadata. */
+export const COMPANY_ID_CLAIM = "https://devraftel.com/company_id";
+export const QUICKBOOKS_ENVIRONMENT_CLAIM =
+  "https://devraftel.com/quickbooks_environment";
+
 export type ClaimBindingPolicyOptions = {
   issuer: string;
   organizationClaim: string;
@@ -13,20 +21,11 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
-/**
- * Return one claim value only. Arrays are intentionally rejected, even when
- * they contain one item: an MCP access token represents exactly one
- * organization.
- */
 function singleClaimValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
-/**
- * Extracts the caller and organization binding without coupling the resource
- * server to an authorization-vendor claim name. The connection service remains
- * the authority for resolving a QuickBooks connection after this decision.
- */
+/** Extract caller authority from verified AuthCo claims. */
 export class ClaimBindingAuthorizationPolicy implements AuthorizationPolicy {
   constructor(private readonly options: ClaimBindingPolicyOptions) {
     if (!options.issuer.trim() || !options.organizationClaim.trim()) {
@@ -38,8 +37,9 @@ export class ClaimBindingAuthorizationPolicy implements AuthorizationPolicy {
     const issuer = nonEmptyString(claims.iss);
     const subject = nonEmptyString(claims.sub);
     const clientId = nonEmptyString(claims.client_id) ?? nonEmptyString(claims.azp);
-    if (!issuer || !subject || !clientId) return { allowed: false, reason: "missing_identity" };
-    if (issuer !== this.options.issuer) return { allowed: false, reason: "missing_identity" };
+    if (!issuer || !subject || !clientId || issuer !== this.options.issuer) {
+      return { allowed: false, reason: "missing_identity" };
+    }
 
     const organizationId = singleClaimValue(claims[this.options.organizationClaim]);
     if (!organizationId) {
@@ -57,6 +57,17 @@ export class ClaimBindingAuthorizationPolicy implements AuthorizationPolicy {
       clientId,
       organizationId,
     };
+
+    if (clientId === STAFF_ACCOUNTANT_AGENT_BRIDGE_CLIENT_ID) {
+      const agentId = singleClaimValue(claims[AGENT_ID_CLAIM]);
+      const environment = singleClaimValue(claims[QUICKBOOKS_ENVIRONMENT_CLAIM]);
+      if (!agentId || environment !== "sandbox") {
+        return { allowed: false, reason: "missing_agent_binding" };
+      }
+      identity.agentId = agentId;
+      identity.environment = "sandbox";
+    }
+
     return { allowed: true, identity };
   }
 }
