@@ -418,6 +418,42 @@ The company is not part of the token. It is chosen per call, as
 `com.devraftel.finance/company_id` in the request's `_meta`, and validated by
 Finance against the organization at the lease.
 
+### Temporary unauthenticated mode
+
+`MCP_TEMPORARY_UNAUTHENTICATED_MODE=true` switches every check above off. It
+exists for one integration window and is scheduled for removal; production
+currently runs on it, which is the reason it is documented here rather than
+quietly left in the code.
+
+**What it does.** The bearer gate is replaced by a middleware that fabricates a
+caller — client id `temporary-unauthenticated-mcp`, all three QuickBooks scopes,
+a five-minute expiry — and takes the organization from
+`com.devraftel.finance/organization_id` in the request's `_meta`. So it skips
+the `Authorization` header entirely, the introspection call to AuthCo, the
+issuer, audience, `exp`/`nbf` and `active` checks, the client allowlist, and
+the organization-binding 403. An `Authorization` header sent while it is on is
+simply not read.
+
+**What still runs.** Everything below the HTTP boundary: the company id in
+`_meta` must still be a canonical UUID, execution-routing fields are still
+rejected as tool arguments, and the Finance workload token and the full
+server-side execution-lease flow are still required. Finance still re-checks
+the organization, the company, and the employee's authorization before handing
+over an Intuit credential. The bypass removes proof of *who is calling*, not
+the controls on *what they may reach*.
+
+**The guard.** Startup refuses the flag unless
+`FINANCE_QUICKBOOKS_ENVIRONMENT=sandbox`, so it cannot be turned on against
+production Intuit data. It defaults to `false`, and `MCP_AUTH_ALLOWED_CLIENT_IDS`
+becomes a startup requirement the moment it is off.
+
+**Turning it off.** This is step 4 of the cutover in
+`spec/quickbooks-mcp-auth-design.md` in the `finance-ai-employees` repository.
+Do it only after Finance has been switched to send a real bearer and that has
+been observed working, because from then on a missing or unacceptable token is
+a 401 or 403 rather than a fabricated identity. Step 5 removes the flag and
+this section with it.
+
 ---
 
 ## Development
