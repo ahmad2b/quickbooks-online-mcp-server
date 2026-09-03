@@ -195,13 +195,33 @@ function sendJsonRpcError(
   status: number,
   code: number,
   message: string,
+  data?: Record<string, unknown>,
 ): void {
   const id = bodyOf(req).id;
   sendJson(res, status, {
     jsonrpc: "2.0",
     id: typeof id === "string" || typeof id === "number" ? id : null,
-    error: { code, message },
+    error: { code, message, ...(data ? { data } : {}) },
   });
+}
+
+/**
+ * Why the authorization policy turned a request away, carried from the
+ * middleware that decided it to the request log that records it. The message
+ * a caller sees stays one generic sentence; the distinction lives in a
+ * machine-readable code, so an operator can tell an unlisted client from a
+ * token missing its organization without reading prose.
+ */
+const AUTHORIZATION_REFUSAL = Symbol.for("devraftel.mcp.authorizationRefusal");
+
+type RefusalCarrier = { [AUTHORIZATION_REFUSAL]?: string };
+
+function recordAuthorizationRefusal(req: Request, reason: string): void {
+  (req as Request & RefusalCarrier)[AUTHORIZATION_REFUSAL] = reason;
+}
+
+function authorizationRefusal(req: Request): string | undefined {
+  return (req as Request & RefusalCarrier)[AUTHORIZATION_REFUSAL];
 }
 
 function sendInBandToolError(
@@ -331,7 +351,15 @@ function makeOrganizationBindingMiddleware(config: HttpConfig, services: Runtime
         : {},
     );
     if (!decision.allowed) {
-      sendJsonRpcError(req, res, 403, -32001, "The caller is not authorized for this resource");
+      recordAuthorizationRefusal(req, decision.reason);
+      sendJsonRpcError(
+        req,
+        res,
+        403,
+        -32001,
+        "The caller is not authorized for this resource",
+        { reason: decision.reason },
+      );
       return;
     }
     next();
@@ -399,6 +427,7 @@ function makeRequestLogger(
         authorityForRegisteredTool(resolver, body.params.name)
         ? body.params.name
         : undefined;
+      const refusal = authorizationRefusal(req);
       logger({
         event: "mcp_request",
         requestId: ids.id,
@@ -408,6 +437,7 @@ function makeRequestLogger(
         status: res.statusCode,
         durationMs: Math.max(0, now() - startedAt),
         principal: stableIdentifier(req.auth?.clientId),
+        ...(refusal ? { authorizationRefusal: refusal } : {}),
       });
     });
     next();

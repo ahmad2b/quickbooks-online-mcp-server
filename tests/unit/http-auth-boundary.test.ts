@@ -231,6 +231,7 @@ function authInfoFor(name: string): AuthInfo {
 type Harness = {
   origin: string;
   executions: ExecutionContext[];
+  logs: Record<string, unknown>[];
   close: () => Promise<void>;
 };
 
@@ -263,6 +264,7 @@ async function makeHarness(
       };
     },
   );
+  const logs: Record<string, unknown>[] = [];
   const httpConfig = config(overrides);
   const services: RuntimeServices = {
     qboClientFactory: { create: leaseCreate },
@@ -330,7 +332,9 @@ async function makeHarness(
     services,
     toolAuthority: (name: string) =>
       name === "get_probe" ? "read" : name === "create_probe" ? "write" : undefined,
-    logger: () => undefined,
+    logger: (entry) => {
+      logs.push(entry as Record<string, unknown>);
+    },
   });
   app.setReady(true);
 
@@ -343,6 +347,7 @@ async function makeHarness(
   const harness: Harness = {
     origin: `http://127.0.0.1:${address.port}`,
     executions,
+    logs,
     close: async () => {
       await app.closeHandler();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -402,6 +407,15 @@ async function call(
   };
 }
 
+function refusalReason(body: unknown): unknown {
+  if (!body || typeof body !== "object") return undefined;
+  const error = (body as { error?: unknown }).error;
+  if (!error || typeof error !== "object") return undefined;
+  const data = (error as { data?: unknown }).data;
+  if (!data || typeof data !== "object") return undefined;
+  return (data as { reason?: unknown }).reason;
+}
+
 describe("the MCP authorization boundary", () => {
   it("answers a missing bearer with 401 and a WWW-Authenticate challenge", async () => {
     const harness = await makeHarness();
@@ -418,18 +432,50 @@ describe("the MCP authorization boundary", () => {
     expect(response.challenge).toContain("invalid_token");
   });
 
-  it("refuses a client that is not on the allowlist with 403", async () => {
+  it("refuses a client that is not on the allowlist with 403 and says why", async () => {
     const harness = await makeHarness();
     const response = await call(harness, { token: "third-party-token" });
     expect(response.status).toBe(403);
+    expect(refusalReason(response.body)).toBe("client_not_allowed");
     expect(harness.executions).toHaveLength(0);
   });
 
-  it("refuses a token with no organization claim with 403", async () => {
+  it("refuses a token with no organization claim with 403 and says why", async () => {
     const harness = await makeHarness();
     const response = await call(harness, { token: "no-organization-token" });
     expect(response.status).toBe(403);
+    expect(refusalReason(response.body)).toBe("missing_organization");
     expect(harness.executions).toHaveLength(0);
+  });
+
+  it("keeps the reason a machine-readable code, not prose", async () => {
+    const harness = await makeHarness();
+    const response = await call(harness, { token: "third-party-token" });
+    const error = (response.body as { error: { message: string } }).error;
+    // The operator-facing distinction lives in `data.reason`; the message
+    // stays one generic sentence so it says nothing about the caller.
+    expect(error.message).not.toContain("client_not_allowed");
+    expect(error.message).toBe("The caller is not authorized for this resource");
+  });
+
+  it("records the refusal reason in the request log", async () => {
+    const harness = await makeHarness();
+    await call(harness, { token: "third-party-token" });
+
+    const entry = harness.logs.find(
+      (line) => line.event === "mcp_request" && line.status === 403,
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.authorizationRefusal).toBe("client_not_allowed");
+  });
+
+  it("logs no refusal reason when the caller is allowed", async () => {
+    const harness = await makeHarness();
+    await call(harness, { token: "finance-worker-token" });
+
+    const entry = harness.logs.find((line) => line.event === "mcp_request");
+    expect(entry?.status).toBe(200);
+    expect(entry).not.toHaveProperty("authorizationRefusal");
   });
 
   it("refuses a scope shortfall with 403 and names the scopes it wanted", async () => {
