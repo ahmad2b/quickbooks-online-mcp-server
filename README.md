@@ -387,7 +387,11 @@ one's verification duty.
 
 1. **The caller to this server.** An AuthCo bearer whose audience is exactly
    `MCP_RESOURCE_URI`. It is introspected on every request (RFC 7662) using the
-   confidential `MCP_AUTH_INTROSPECTION_CLIENT_ID` credentials.
+   confidential `MCP_AUTH_INTROSPECTION_CLIENT_ID` credentials. There is
+   deliberately no local JWKS path: `MCP_AUTH_JWKS_URL` must stay unset and
+   startup rejects it if present, because verifying a signature locally would
+   accept a token that AuthCo has since revoked or whose organization
+   membership has since ended.
 2. **This server to Finance.** The shared workload token
    `FINANCE_QUICKBOOKS_WORKLOAD_TOKEN`, presented when asking for an execution
    lease.

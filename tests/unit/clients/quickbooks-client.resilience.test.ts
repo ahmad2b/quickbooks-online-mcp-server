@@ -183,6 +183,37 @@ describe("FinanceExecutionLeaseProvider", () => {
     }
   });
 
+  it("names the caller from the token and carries no agent binding", async () => {
+    const calls: Array<{ init: RequestInit }> = [];
+    const fetchImpl = jest.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ init: init ?? {} });
+      return jsonResponse(leaseResponse());
+    }) as unknown as typeof fetch;
+    const provider = new FinanceExecutionLeaseProvider({
+      baseUrl: "http://finance.internal/",
+      workloadToken: WORKLOAD_TOKEN,
+      environment: "sandbox",
+      fetchImpl,
+    });
+
+    await provider.acquire(context);
+
+    const body = JSON.parse(String(calls[0].init.body)) as Record<string, any>;
+    // The caller block is the token's own identity, nothing else. For a
+    // machine token subject_id is the client id; for a user-delegated one it
+    // is the person. Finance treats it as audit context either way.
+    expect(body.caller).toEqual({
+      issuer: context.issuer,
+      subject_id: context.subjectId,
+      oauth_client_id: context.oauthClientId,
+      scopes: ["quickbooks.read"],
+    });
+    // The Agent Auth bridge is gone. Finance's lease model forbids unknown
+    // fields, so a resurrected agent_id would fail the request outright.
+    expect(body.caller).not.toHaveProperty("agent_id");
+    expect(JSON.stringify(body)).not.toContain("agent_id");
+  });
+
   it("rejects tenant mismatches and forbidden credential-bearing response fields", async () => {
     const mismatchedFetch = jest.fn(async () => jsonResponse(leaseResponse({
       company_id: "00000000-0000-4000-8000-000000000099",
