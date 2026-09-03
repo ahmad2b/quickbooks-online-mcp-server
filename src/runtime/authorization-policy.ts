@@ -13,8 +13,13 @@ export type ClaimBindingPolicyOptions = {
    * alone does not establish who is calling; without this list a third-party
    * client could carry a user's organization all the way to Finance's lease.
    *
-   * An empty list disables the check, which is reachable only in temporary
-   * unauthenticated mode. Every other deployment fails to start without it.
+   * An empty list disables the check. That is not a fallback: it is how
+   * temporary unauthenticated mode must build this policy, because that mode
+   * fabricates a caller identity that is deliberately never allowlisted, and
+   * this policy is re-run at the execution seam on every tool call whatever
+   * the HTTP layer did. `createProductionRuntime` passes an empty list in that
+   * mode and the configured list in every other, where `loadHttpConfig` makes
+   * a non-empty list a startup requirement.
    */
   allowedClientIds: readonly string[];
 };

@@ -266,12 +266,16 @@ async function makeHarness(
   );
   const logs: Record<string, unknown>[] = [];
   const httpConfig = config(overrides);
+  // Mirror createProductionRuntime: temporary mode has no authenticated caller
+  // to allow, so the policy is built without an allowlist.
   const services: RuntimeServices = {
     qboClientFactory: { create: leaseCreate },
     authorizationPolicy: new ClaimBindingAuthorizationPolicy({
       issuer: httpConfig.authIssuer,
       organizationClaim: httpConfig.authOrganizationClaim,
-      allowedClientIds: httpConfig.allowedClientIds,
+      allowedClientIds: httpConfig.temporaryUnauthenticatedMode
+        ? []
+        : httpConfig.allowedClientIds,
     }),
   };
 
@@ -415,6 +419,71 @@ function refusalReason(body: unknown): unknown {
   if (!data || typeof data !== "object") return undefined;
   return (data as { reason?: unknown }).reason;
 }
+
+async function callUnauthenticated(
+  harness: Harness,
+  organizationId = "organization-1",
+): Promise<{ status: number; body: unknown }> {
+  const body = callBody();
+  (body.params._meta as Record<string, unknown>)[
+    "com.devraftel.finance/organization_id"
+  ] = organizationId;
+  const response = await fetch(`${harness.origin}/mcp`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json, text/event-stream",
+      "Content-Type": "application/json",
+      "MCP-Protocol-Version": "2026-07-28",
+      "Mcp-Method": "tools/call",
+      "Mcp-Name": "get_probe",
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  return { status: response.status, body: text ? JSON.parse(text) : undefined };
+}
+
+describe("temporary unauthenticated mode", () => {
+  it("still reaches the lease while a client allowlist is configured", async () => {
+    // Cutover step 2 deploys the allowlist with temporary mode still on, and
+    // `.env.example` ships exactly this pair. The temporary middleware invents
+    // a caller id that is deliberately not on the allowlist, so the policy the
+    // execution seam runs must not be enforcing one in this mode.
+    const harness = await makeHarness({
+      temporaryUnauthenticatedMode: true,
+      allowedClientIds: [FINANCE_WORKER],
+    });
+
+    const response = await callUnauthenticated(harness);
+
+    expect(response.status).toBe(200);
+    expect(harness.executions).toHaveLength(1);
+    expect(harness.executions[0].organizationId).toBe("organization-1");
+  });
+
+  it("still requires organization metadata on the call", async () => {
+    const harness = await makeHarness({
+      temporaryUnauthenticatedMode: true,
+      allowedClientIds: [FINANCE_WORKER],
+    });
+
+    const body = callBody();
+    const response = await fetch(`${harness.origin}/mcp`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "get_probe",
+      },
+      body: JSON.stringify(body),
+    });
+    await response.text();
+
+    expect(harness.executions).toHaveLength(0);
+  });
+});
 
 describe("the MCP authorization boundary", () => {
   it("answers a missing bearer with 401 and a WWW-Authenticate challenge", async () => {

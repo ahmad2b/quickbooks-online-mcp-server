@@ -430,9 +430,15 @@ caller — client id `temporary-unauthenticated-mcp`, all three QuickBooks scope
 a five-minute expiry — and takes the organization from
 `com.devraftel.finance/organization_id` in the request's `_meta`. So it skips
 the `Authorization` header entirely, the introspection call to AuthCo, the
-issuer, audience, `exp`/`nbf` and `active` checks, the client allowlist, and
-the organization-binding 403. An `Authorization` header sent while it is on is
-simply not read.
+issuer, audience, `exp`/`nbf` and `active` checks, and the organization-binding
+403. An `Authorization` header sent while it is on is simply not read.
+
+`MCP_AUTH_ALLOWED_CLIENT_IDS` is not enforced in this mode either, and cannot
+be: the fabricated caller id is not a real client and is never allowlisted,
+while the authorization policy that would check it runs again at the execution
+seam on every tool call regardless of mode. The runtime therefore builds that
+policy with no allowlist while the bypass is on. Setting the variable during
+the cutover window is correct and has no effect until the bypass is off.
 
 **What still runs.** Everything below the HTTP boundary: the company id in
 `_meta` must still be a canonical UUID, execution-routing fields are still
@@ -445,7 +451,7 @@ the controls on *what they may reach*.
 **The guard.** Startup refuses the flag unless
 `FINANCE_QUICKBOOKS_ENVIRONMENT=sandbox`, so it cannot be turned on against
 production Intuit data. It defaults to `false`, and `MCP_AUTH_ALLOWED_CLIENT_IDS`
-becomes a startup requirement the moment it is off.
+becomes a startup requirement, and starts being enforced, the moment it is off.
 
 **Turning it off.** This is step 4 of the cutover in
 `spec/quickbooks-mcp-auth-design.md` in the `finance-ai-employees` repository.

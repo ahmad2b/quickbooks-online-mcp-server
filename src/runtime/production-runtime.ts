@@ -33,7 +33,14 @@ export async function createProductionRuntime(
   const authorizationPolicy = new ClaimBindingAuthorizationPolicy({
     issuer: config.authIssuer,
     organizationClaim: config.authOrganizationClaim,
-    allowedClientIds: config.allowedClientIds,
+    // Temporary unauthenticated mode has no authenticated caller to allow. It
+    // fabricates a caller identity, and the execution seam re-runs this policy
+    // on every tool call whatever the mode, so an allowlist here would refuse
+    // every call in the cutover window where the list is configured but the
+    // bypass is still on. The fabricated id is deliberately never allowlisted.
+    allowedClientIds: config.temporaryUnauthenticatedMode
+      ? []
+      : config.allowedClientIds,
   });
 
   return {
