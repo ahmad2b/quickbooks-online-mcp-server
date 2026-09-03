@@ -12,12 +12,7 @@ import {
 import { z } from "zod";
 import type { ToolDefinition } from "../../../src/types/tool-definition";
 import type { RuntimeServices } from "../../../src/runtime/contracts";
-import {
-  AGENT_ID_CLAIM,
-  ClaimBindingAuthorizationPolicy,
-  QUICKBOOKS_ENVIRONMENT_CLAIM,
-  STAFF_ACCOUNTANT_AGENT_BRIDGE_CLIENT_ID,
-} from "../../../src/runtime/authorization-policy";
+import { ClaimBindingAuthorizationPolicy } from "../../../src/runtime/authorization-policy";
 
 function runtimeServices(): RuntimeServices {
   const qboClientFactory = {
@@ -83,29 +78,28 @@ describe("getCrudCategory", () => {
 });
 
 describe("authority metadata", () => {
-  it("accepts a Staff Accountant bearer without a company claim", () => {
+  it("grants an allowlisted caller its organization and nothing else", () => {
     const policy = new ClaimBindingAuthorizationPolicy({
       issuer: "https://issuer",
       organizationClaim: "organization_id",
+      allowedClientIds: ["finance-worker"],
     });
     const decision = policy.authorize({
       iss: "https://issuer",
-      sub: "owner",
-      client_id: STAFF_ACCOUNTANT_AGENT_BRIDGE_CLIENT_ID,
+      sub: "finance-worker",
+      client_id: "finance-worker",
       organization_id: "org",
-      [AGENT_ID_CLAIM]: "agent-1",
-      [QUICKBOOKS_ENVIRONMENT_CLAIM]: "sandbox",
     });
 
-    expect(decision).toMatchObject({
+    expect(decision).toEqual({
       allowed: true,
       identity: {
-        agentId: "agent-1",
-        environment: "sandbox",
+        issuer: "https://issuer",
+        subject: "finance-worker",
+        clientId: "finance-worker",
         organizationId: "org",
       },
     });
-    if (decision.allowed) expect(decision.identity.companyId).toBeUndefined();
   });
 
   it("classifies every supported authority prefix and rejects unknown names", () => {

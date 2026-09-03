@@ -33,6 +33,7 @@ export async function createProductionRuntime(
   const authorizationPolicy = new ClaimBindingAuthorizationPolicy({
     issuer: config.authIssuer,
     organizationClaim: config.authOrganizationClaim,
+    allowedClientIds: config.allowedClientIds,
   });
 
   return {

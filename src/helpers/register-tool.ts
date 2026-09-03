@@ -203,7 +203,6 @@ export function executionContextFromServerContext(
   const identity = decision.identity;
   const companyId = companyIdFromServerContext(context);
   if (!companyId) return undefined;
-  if (identity.agentId && identity.environment !== "sandbox") return undefined;
   // The verifier is responsible for cryptographic validation, but the
   // execution seam still refuses an inconsistent AuthInfo object. This keeps
   // custom test/deployment verifiers from substituting a different principal
@@ -225,9 +224,6 @@ export function executionContextFromServerContext(
     oauthClientId: identity.clientId,
     organizationId: identity.organizationId,
     companyId,
-    ...(identity.agentId
-      ? { agentId: identity.agentId, environment: identity.environment }
-      : {}),
     scopes,
   });
 }

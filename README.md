@@ -8,8 +8,7 @@
 [![Tools](https://img.shields.io/badge/Tools-142-green.svg)](#available-tools)
 [![Entities](https://img.shields.io/badge/Entities-29-orange.svg)](#entities)
 [![Reports](https://img.shields.io/badge/Reports-11-purple.svg)](#reports)
-[![Coverage](https://img.shields.io/badge/Coverage-configured%20gates%20passing-brightgreen.svg)](#testing)
-[![Tests](https://img.shields.io/badge/Tests-531-blue.svg)](#testing)
+[![Tests](https://img.shields.io/badge/Tests-581-blue.svg)](#testing)
 
 [Quick Start](#quick-start) | [Available Tools](#available-tools) | [Authentication](#authentication) | [Documentation](#documentation)
 
@@ -29,15 +28,19 @@ are intentionally absent.
 - **142 Total Tools** - Complete coverage of QuickBooks Online API
 - **29 Entity Types** - Full CRUD operations (Create, Read, Update, Delete, Search)
 - **11 Financial Reports** - Balance Sheet, P&L, Cash Flow, and more
-- **OAuth 2.0 Authentication** - Secure token-based authentication
+- **OAuth 2.1 resource server** - every bearer is introspected at AuthCo
 - **TypeScript** - Full type safety with Zod validation
 - **Tested** - Jest test suite with ESM support
 
-Production requires a standards-compliant OAuth authorization server for MCP,
-an AuthCo/control-plane grant for one organization, and authenticated provider
-adapters for execution leases, the durable operation ledger, and shared rate
-limiting. The MCP process never owns
-Intuit refresh tokens, client secrets, or a default company.
+This process owns the remote tool interface and request-scoped QuickBooks
+execution, and nothing else. It holds no Intuit client secret, no refresh
+token, no realm, no database, and no default company. For each call it verifies
+the caller at AuthCo and then asks Finance for one short-lived execution lease.
+
+Production therefore requires two things beyond this repository: AuthCo as the
+authorization server, and Finance reachable at its internal execution-lease
+endpoint. There is no operation ledger or rate-limiter adapter; see
+[Deliberately deferred controls](docs/REMOTE-HTTP.md).
 
 ---
 
@@ -59,17 +62,17 @@ npm run build
 
 ### Configuration
 
-Copy the template and supply the exact QuickBooks MCP resource URL,
-authorization-server metadata, organization claim name, independent
-request-state and operation-fingerprint keys, and deployment adapter
-references:
+Copy the template and supply the exact QuickBooks MCP resource URL, the
+AuthCo metadata and introspection credentials, the organization claim name, the
+client allowlist, and the Finance lease settings:
 
 ```bash
 cp .env.example .env
 ```
 
-Generate both 32-byte keys independently with `openssl rand -base64 32`.
-`.env` is gitignored, but deployed secrets should use the platform secret store.
+`.env` is gitignored; deployed secrets belong in the platform secret store.
+Every variable the server reads is listed in `.env.example`, and startup
+rejects anything missing or malformed rather than falling back to a default.
 
 ### Remote Streamable HTTP
 
@@ -92,24 +95,23 @@ MCP_AUTH_INTROSPECTION_URL=https://authorization-server.example/introspect
 MCP_AUTH_INTROSPECTION_CLIENT_ID=...
 MCP_AUTH_INTROSPECTION_CLIENT_SECRET=...
 MCP_AUTH_ORGANIZATION_CLAIM=https://devraftel.com/organization_id
-MCP_REQUEST_STATE_KEY=...
-MCP_OPERATION_FINGERPRINT_KEY=...
-MCP_OPERATION_FINGERPRINT_KEY_VERSION=v1
-QBO_EXECUTION_LEASE_PROVIDER=devraftel-connection-service
-OPERATION_LEDGER_PROVIDER=devraftel-execution-ledger
-RATE_LIMIT_PROVIDER=devraftel-rate-limiter
-MCP_WORKLOAD_IDENTITY=quickbooks-mcp-production
+MCP_AUTH_ALLOWED_CLIENT_IDS=finance-worker
+MCP_BODY_LIMIT=3mb
+MCP_REQUEST_TIMEOUT_MS=30000
+QBO_EXECUTION_LEASE_PROVIDER=finance-http
+FINANCE_QUICKBOOKS_INTERNAL_URL=http://finance-backend:8000
+FINANCE_QUICKBOOKS_WORKLOAD_TOKEN=...
+FINANCE_QUICKBOOKS_ENVIRONMENT=sandbox
+FINANCE_QUICKBOOKS_TIMEOUT_MS=5000
 ```
 
-The configured authorization server protects this resource with
-`quickbooks.read`, `quickbooks.write`, and `quickbooks.delete`. AuthCo is the
-initial deployment choice. Every access token is introspected so live
-organization membership and revocation are enforced before execution. The
-trusted execution-lease provider resolves the
-organization's QuickBooks connection after authorization; no connection or
-company identifier is supplied by the client. See
-[`docs/REMOTE-HTTP.md`](docs/REMOTE-HTTP.md) for durable state, confirmation,
-and deployment validation.
+AuthCo protects this resource with `quickbooks.read`, `quickbooks.write`, and
+`quickbooks.delete`. Every access token is introspected, so revocation and live
+organization membership are enforced before execution rather than trusted from
+a signature. The Finance lease provider resolves the organization's QuickBooks
+connection after authorization; the client supplies no connection, realm, or
+credential. See [`docs/REMOTE-HTTP.md`](docs/REMOTE-HTTP.md) for the full
+request path and deployment validation.
 
 ### MCP client integration
 
@@ -380,21 +382,41 @@ Complete CRUD operations are available for all entity types:
 
 ## Authentication
 
-There are two independent OAuth relationships:
+Three credentials meet in one tool call, and this server holds only the middle
+one's verification duty.
 
-1. The configured authorization server authenticates MCP callers and issues a
-   token for the exact `MCP_RESOURCE_URI` audience.
-2. Intuit authorizes this service to one QuickBooks company. Obtain the initial
-   realm and refresh token through an operator-controlled Intuit authorization
-   workflow outside this runtime.
+1. **The caller to this server.** An AuthCo bearer whose audience is exactly
+   `MCP_RESOURCE_URI`. It is introspected on every request (RFC 7662) using the
+   confidential `MCP_AUTH_INTROSPECTION_CLIENT_ID` credentials.
+2. **This server to Finance.** The shared workload token
+   `FINANCE_QUICKBOOKS_WORKLOAD_TOKEN`, presented when asking for an execution
+   lease.
+3. **Finance to Intuit.** Owned entirely by Finance. No Intuit client secret,
+   refresh token, or realm is ever configured here or held in this process.
 
-For first database provision, supply the Intuit environment, realm, and refresh
-token together. After startup creates the connection row, remove the realm and
-refresh token from deployment environment variables. The service thereafter
-loads encrypted state from PostgreSQL and atomically persists every rotation.
-Dead or revoked refresh tokens mark the connection
-`reauthorization_required`; request handling never opens a browser or callback
-listener.
+A verified bearer must satisfy four conditions before any lease is requested:
+
+- its `aud` is exactly this resource, and never a list containing it;
+- it carries `quickbooks.read` plus the authority scope the called tool
+  declares (`quickbooks.write` for create/update, `quickbooks.delete` for
+  delete);
+- it carries exactly one `MCP_AUTH_ORGANIZATION_CLAIM` value;
+- its `client_id` (or `azp`) appears in `MCP_AUTH_ALLOWED_CLIENT_IDS`.
+
+That last check is what stops a third-party client from reaching Finance. The
+audience alone does not identify a caller: AuthCo will mint a token for this
+resource for any client a user consents to, so the allowlist is what limits the
+door to DevRaftel's own workers.
+
+The subject may be a person or a machine. The Finance worker presents a
+`client_credentials` token whose `sub` is its own client id, with the
+organization named on the token request; both shapes are accepted, and neither
+grants anything beyond the organization in the claim. Finance re-checks the
+company and the employee's authorization when it issues the lease.
+
+The company is not part of the token. It is chosen per call, as
+`com.devraftel.finance/company_id` in the request's `_meta`, and validated by
+Finance against the organization at the lease.
 
 ---
 
@@ -412,27 +434,38 @@ npm run build
 npm test
 ```
 
-The test suite includes **531 tests** across 30 suites, with the repository's configured coverage gates passing.
+The test suite includes **581 tests** across 33 suites. Coverage is collected
+on every run and the configured global threshold is 100%, which the suite does
+not currently meet; `npm test` therefore reports the shortfall after the tests
+themselves pass.
 
 ### Project Structure
 
 ```
 src/
-├── clients/          # QuickBooks API client
-├── handlers/         # Business logic handlers (87 files)
+├── adapters/        # Finance execution-lease HTTP client
+├── auth/            # AuthCo introspection verifier, resource metadata
+├── clients/         # Request-scoped QuickBooks client factory
+├── handlers/        # Business logic handlers (87 files)
+├── helpers/         # Tool registration, authorization, utilities
+├── runtime/         # Authorization policy, contracts, composition
+├── server/          # MCP server assembly
 ├── tools/           # MCP tool definitions
-├── helpers/         # Utility functions
 ├── types/           # TypeScript types
+├── http-config.ts   # Startup configuration validation
+├── http-server.ts   # Express app, middleware chain, HTTP boundary
 └── index.ts         # Server entry point
 
 tests/
-├── unit/            # Unit tests (531 tests)
-│   ├── handlers/    # Handler tests (15 test files)
-│   └── helpers/     # Helper tests
+├── unit/            # Unit tests (581 tests across 33 suites)
+│   ├── handlers/    # Handler tests
+│   ├── helpers/     # Helper and tool-authorization tests
+│   └── runtime/     # Authorization policy tests
 └── mocks/           # Test mocks
 
 docs/
 ├── ARCHITECTURE.md  # System architecture & design patterns
+├── REMOTE-HTTP.md   # Production Streamable HTTP and the request path
 ├── TESTING.md       # Testing guide & patterns
 └── plans/           # Development plans
 ```
@@ -453,10 +486,17 @@ docs/
 
 If you encounter connection errors:
 
-1. Verify all environment variables are set correctly
-2. Check that tokens are valid and not expired
-3. Ensure the QuickBooks app has the correct redirect URIs
-4. For sandbox testing, use `QUICKBOOKS_ENVIRONMENT=sandbox`
+1. Verify every variable in `.env.example` is set; startup names the ones it
+   rejected.
+2. A 401 with `WWW-Authenticate` means the bearer was missing, expired, or
+   failed introspection at AuthCo.
+3. A 403 means the token was valid but the caller was refused: the client id is
+   not in `MCP_AUTH_ALLOWED_CLIENT_IDS`, the organization claim is missing or
+   ambiguous, or the tool's authority scope was not granted.
+4. An in-band `QBO_EXECUTION_LEASE_UNAVAILABLE` or `QBO_EXECUTION_LEASE_INVALID`
+   means Finance refused or could not answer the lease request; check
+   `FINANCE_QUICKBOOKS_INTERNAL_URL` and the workload token.
+5. For sandbox testing, use `FINANCE_QUICKBOOKS_ENVIRONMENT=sandbox`.
 
 ---
 

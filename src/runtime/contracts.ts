@@ -19,8 +19,6 @@ export type ExecutionContext = Readonly<{
   oauthClientId: string;
   organizationId: string;
   companyId: string;
-  agentId?: string;
-  environment?: "sandbox";
   scopes: ReadonlySet<QuickBooksScope>;
 }>;
 
@@ -79,9 +77,6 @@ export type CallerIdentity = {
   subject: string;
   clientId: string;
   organizationId: string;
-  agentId?: string;
-  companyId?: string;
-  environment?: "sandbox";
 };
 
 export type AuthorizationDecision =
@@ -90,9 +85,9 @@ export type AuthorizationDecision =
       allowed: false;
       reason:
         | "missing_identity"
+        | "client_not_allowed"
         | "missing_organization"
-        | "ambiguous_organization"
-        | "missing_agent_binding";
+        | "ambiguous_organization";
     };
 
 /** Provider-neutral caller/organization policy. OAuth scopes are checked separately. */

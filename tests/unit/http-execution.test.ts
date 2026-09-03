@@ -86,6 +86,7 @@ function config(overrides: Partial<HttpConfig> = {}): HttpConfig {
     bodyLimit: "1mb",
     requestTimeoutMs: 2_000,
     authOrganizationClaim: ORGANIZATION_CLAIM,
+    allowedClientIds: [],
     temporaryUnauthenticatedMode: false,
     qboExecutionLeaseProvider: "test-lease-provider",
     ...overrides,
@@ -150,6 +151,9 @@ function makeHarness(
     authorizationPolicy: new ClaimBindingAuthorizationPolicy({
       issuer: ISSUER,
       organizationClaim: ORGANIZATION_CLAIM,
+      // This suite exercises the execution seam across many tenants; the
+      // client allowlist has its own suite in http-auth-boundary.test.ts.
+      allowedClientIds: [],
     }),
   };
   const schema = z.object({ id: z.string().min(1) });

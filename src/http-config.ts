@@ -20,6 +20,13 @@ export type HttpConfig = {
   bodyLimit: string;
   requestTimeoutMs: number;
   authOrganizationClaim: string;
+  /**
+   * OAuth client ids permitted to reach this resource server. AuthCo will mint
+   * a token for this resource for any client a user consents to, so the
+   * audience alone does not say who is calling. Empty only in temporary
+   * unauthenticated mode, where there is no caller identity to allow.
+   */
+  allowedClientIds: readonly string[];
   /** TEMPORARY sandbox-only escape hatch. Defaults off. */
   temporaryUnauthenticatedMode: boolean;
   /** Opaque adapter references; transport is selected by DevRaftel deployment. */
@@ -54,6 +61,26 @@ function parsePositiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) errors.push(name);
   return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function parseClientAllowlist(
+  value: string | undefined,
+  name: string,
+  errors: string[],
+  requiredValue: boolean,
+): string[] {
+  const entries = (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (entries.length === 0) {
+    if (requiredValue) errors.push(name);
+    return [];
+  }
+  // A wildcard would silently restore the "any consented client" hole this
+  // allowlist exists to close.
+  if (entries.some((entry) => entry === "*")) errors.push(name);
+  return entries;
 }
 
 function hostnameFromAllowlistValue(value: string): string | undefined {
@@ -157,6 +184,12 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     false,
     errors,
   );
+  const allowedClientIds = parseClientAllowlist(
+    env.MCP_AUTH_ALLOWED_CLIENT_IDS,
+    "MCP_AUTH_ALLOWED_CLIENT_IDS",
+    errors,
+    !temporaryUnauthenticatedMode,
+  );
   if (
     temporaryUnauthenticatedMode &&
     env.FINANCE_QUICKBOOKS_ENVIRONMENT?.trim().toLowerCase() !== "sandbox"
@@ -192,6 +225,7 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
     bodyLimit,
     requestTimeoutMs,
     authOrganizationClaim,
+    allowedClientIds,
     temporaryUnauthenticatedMode,
     qboExecutionLeaseProvider,
   };
