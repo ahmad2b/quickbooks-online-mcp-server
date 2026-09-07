@@ -15,3 +15,6 @@ start.cmd
 capture-*.txt
 
 .vercel
+
+# Local pulls of deployment environment; never commit.
+.env.vercel.*

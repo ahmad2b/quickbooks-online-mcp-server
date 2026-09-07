@@ -84,5 +84,7 @@ export async function loadOAuthMetadata(
   options: OAuthMetadataLoadOptions = {},
 ): Promise<OAuthMetadata> {
   if (options.metadata) return validateOAuthMetadata(options.metadata, config.authIssuer);
+  // Only oauth mode publishes authorization-server metadata.
+  if (!config.authMetadataUrl) throw metadataError();
   return fetchMetadata(config.authMetadataUrl, config.authIssuer, options.fetchImpl ?? fetch);
 }

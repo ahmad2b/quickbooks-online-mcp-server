@@ -89,6 +89,9 @@ MCP_PORT=3000
 MCP_RESOURCE_URI=https://quickbooks-mcp.devraftel.com/mcp
 MCP_ALLOWED_HOSTS=quickbooks-mcp.devraftel.com
 MCP_ALLOWED_ORIGINS=your-final-client.example
+MCP_AUTH_MODE=shared-secret
+MCP_SHARED_SECRET=...
+# The MCP_AUTH_* lines below are read only when MCP_AUTH_MODE=oauth.
 MCP_AUTH_ISSUER=https://authorization-server.example/issuer
 MCP_AUTH_METADATA_URL=https://authorization-server.example/.well-known/oauth-authorization-server
 MCP_AUTH_INTROSPECTION_URL=https://authorization-server.example/introspect
@@ -105,10 +108,14 @@ FINANCE_QUICKBOOKS_ENVIRONMENT=sandbox
 FINANCE_QUICKBOOKS_TIMEOUT_MS=5000
 ```
 
-AuthCo protects this resource with `quickbooks.read`, `quickbooks.write`, and
-`quickbooks.delete`. Every access token is introspected, so revocation and live
-organization membership are enforced before execution rather than trusted from
-a signature. The Finance lease provider resolves the organization's QuickBooks
+Two authentication modes are selected by `MCP_AUTH_MODE`. In `shared-secret`
+mode the Finance worker, the only caller, presents `MCP_SHARED_SECRET` as its
+bearer; it is compared in constant time, organization and company arrive in
+per-call metadata, and Finance re-checks both when it issues the Intuit lease.
+In `oauth` mode AuthCo protects this resource with `quickbooks.read`,
+`quickbooks.write`, and `quickbooks.delete`, and every access token is
+introspected, so revocation and live organization membership are enforced
+before execution rather than trusted from a signature. The Finance lease provider resolves the organization's QuickBooks
 connection after authorization; the client supplies no connection, realm, or
 credential. See [`docs/REMOTE-HTTP.md`](docs/REMOTE-HTTP.md) for the full
 request path and deployment validation.

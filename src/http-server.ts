@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import http from "node:http";
-import type { Express, NextFunction, Request, Response } from "express";
+import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 import {
   bearerAuthChallengeResponse,
   createMcpHandler,
@@ -27,9 +27,12 @@ import {
   FORBIDDEN_EXECUTION_INPUT_MESSAGE,
 } from "./helpers/register-tool.js";
 import {
+  authModeOf,
+  HttpConfigurationError,
   loadHttpConfig,
   MCP_PATH,
   QUICKBOOKS_SCOPES,
+  SHARED_SECRET_CLIENT_ID,
   type HttpConfig,
 } from "./http-config.js";
 import { loadOAuthMetadata } from "./auth/oauth-metadata.js";
@@ -66,7 +69,8 @@ export type HttpServerLogger = (record: RequestLog) => void;
 
 export type HttpAppOptions = {
   config: HttpConfig;
-  oauthMetadata: OAuthMetadata;
+  /** Required in oauth mode; shared-secret mode publishes none. */
+  oauthMetadata?: OAuthMetadata;
   tokenVerifier?: OAuthTokenVerifier;
   serverFactory?: McpServerFactory;
   logger?: HttpServerLogger;
@@ -282,6 +286,95 @@ export function makeTemporaryUnauthenticatedMiddleware(config: HttpConfig) {
   };
 }
 
+/** Never echo the secret itself back through AuthInfo. */
+const SHARED_SECRET_TOKEN_PLACEHOLDER = "shared-secret";
+
+function sharedSecretAuthInfo(req: Request, config: HttpConfig): AuthInfo {
+  const organizationId = organizationIdFromMeta(bodyOf(req).params?._meta);
+  const claims: Record<string, unknown> = {
+    iss: config.authIssuer,
+    sub: SHARED_SECRET_CLIENT_ID,
+    client_id: SHARED_SECRET_CLIENT_ID,
+    ...(organizationId ? { [config.authOrganizationClaim]: organizationId } : {}),
+  };
+  return {
+    token: SHARED_SECRET_TOKEN_PLACEHOLDER,
+    clientId: SHARED_SECRET_CLIENT_ID,
+    scopes: [...QUICKBOOKS_SCOPES],
+    expiresAt: Math.floor(Date.now() / 1_000) + 300,
+    resource: config.resourceUri,
+    extra: { claims },
+  };
+}
+
+function bearerFrom(req: Request): string | undefined {
+  return /^Bearer\s+(\S+)\s*$/i.exec(req.get("authorization") ?? "")?.[1];
+}
+
+function secretsMatch(presented: string, expected: string): boolean {
+  // Hash both sides first so the comparison is independent of length: neither
+  // the length nor the position of the first differing byte leaks through timing.
+  const a = crypto.createHash("sha256").update(presented).digest();
+  const b = crypto.createHash("sha256").update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * Shared-secret replacement for the OAuth bearer gate. The Finance worker is
+ * the only caller; one secret it shares with this server proves that, and it
+ * carries identity, not authority. Organization is accepted from per-call
+ * metadata as in temporary mode, and the execution seam re-runs the
+ * authorization policy on every tool call whatever this layer did.
+ */
+export function makeSharedSecretMiddleware(config: HttpConfig) {
+  const expected = config.sharedSecret;
+  if (!expected) throw new HttpConfigurationError(["MCP_SHARED_SECRET"]);
+  const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(config.resourceUri);
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const presented = bearerFrom(req);
+    if (!presented || !secretsMatch(presented, expected)) {
+      await sendFetchResponse(
+        res,
+        bearerAuthChallengeResponse(
+          new OAuthError(OAuthErrorCode.InvalidToken, "The shared secret is missing or not accepted"),
+          { resourceMetadataUrl },
+        ),
+      );
+      return;
+    }
+    req.auth = sharedSecretAuthInfo(req, config);
+    next();
+  };
+}
+
+/**
+ * The oauth-mode verifier. Its settings are optional on HttpConfig because
+ * shared-secret mode has none; oauth mode without them is a configuration
+ * error and is reported as one.
+ */
+function oauthVerifierFrom(config: HttpConfig, fetchImpl?: typeof fetch): OAuthTokenVerifier {
+  const { authIntrospectionUrl, authIntrospectionClientId, authIntrospectionClientSecret } = config;
+  if (!authIntrospectionUrl || !authIntrospectionClientId || !authIntrospectionClientSecret) {
+    throw new HttpConfigurationError([
+      "MCP_AUTH_INTROSPECTION_URL",
+      "MCP_AUTH_INTROSPECTION_CLIENT_ID",
+      "MCP_AUTH_INTROSPECTION_CLIENT_SECRET",
+    ]);
+  }
+  return new OAuthAccessTokenVerifier({
+    issuer: config.authIssuer,
+    resourceUri: config.resourceUri.toString(),
+    introspectionUrl: authIntrospectionUrl.toString(),
+    introspectionClientId: authIntrospectionClientId,
+    introspectionClientSecret: authIntrospectionClientSecret,
+    ...(fetchImpl ? { fetchImpl } : {}),
+  });
+}
+
+function missingSetting(name: string): never {
+  throw new HttpConfigurationError([name]);
+}
+
 function passThrough(_req: Request, _res: Response, next: NextFunction): void {
   next();
 }
@@ -463,13 +556,16 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
   const logger = options.logger ?? logToStderr;
   const version = options.version ?? process.env.APP_VERSION ?? APPLICATION_VERSION;
   const state = { ready: false, draining: false, inFlight: 0 };
-  const tokenVerifier = options.tokenVerifier ?? new OAuthAccessTokenVerifier({
-    issuer: options.config.authIssuer,
-    resourceUri: options.config.resourceUri.toString(),
-    introspectionUrl: options.config.authIntrospectionUrl.toString(),
-    introspectionClientId: options.config.authIntrospectionClientId,
-    introspectionClientSecret: options.config.authIntrospectionClientSecret,
-  });
+  // oauth mode's pieces are validated before anything is allocated, so a
+  // misconfiguration fails here rather than behind an already-open handler.
+  // `oauth` is defined exactly when the mode is oauth, which lets the branches
+  // below narrow on it without an assertion.
+  const oauth = authModeOf(options.config) === "oauth"
+    ? {
+        metadata: options.oauthMetadata ?? missingSetting("MCP_AUTH_METADATA_URL"),
+        verifier: options.tokenVerifier ?? oauthVerifierFrom(options.config),
+      }
+    : undefined;
   const handler = createMcpHandler(
     options.serverFactory ?? defaultServerFactory(options.services),
     {
@@ -491,12 +587,14 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
   });
   const toolAuthority = options.toolAuthority;
 
-  app.use(mcpAuthMetadataRouter({
-    oauthMetadata: options.oauthMetadata,
-    resourceServerUrl: options.config.resourceUri,
-    scopesSupported: [...QUICKBOOKS_SCOPES],
-    resourceName: "QuickBooks Online MCP Server",
-  }));
+  if (oauth) {
+    app.use(mcpAuthMetadataRouter({
+      oauthMetadata: oauth.metadata,
+      resourceServerUrl: options.config.resourceUri,
+      scopesSupported: [...QUICKBOOKS_SCOPES],
+      resourceName: "QuickBooks Online MCP Server",
+    }));
+  }
 
   const health = (_req: Request, res: Response): void => {
     const ready = state.ready && !state.draining;
@@ -510,17 +608,26 @@ export function createHttpApp(options: HttpAppOptions): HttpApp {
   app.get("/readyz", health);
   app.get("/healthz", health);
 
-  const authenticate = options.config.temporaryUnauthenticatedMode
-    ? makeTemporaryUnauthenticatedMiddleware(options.config)
-    : requireBearerAuth({
-        verifier: tokenVerifier,
-        requiredScopes: ["quickbooks.read"],
-        resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.config.resourceUri),
-      });
+  let authenticate: RequestHandler;
+  let organizationBinding: RequestHandler;
+  if (options.config.temporaryUnauthenticatedMode) {
+    authenticate = makeTemporaryUnauthenticatedMiddleware(options.config);
+    organizationBinding = passThrough;
+  } else if (oauth) {
+    authenticate = requireBearerAuth({
+      verifier: oauth.verifier,
+      requiredScopes: ["quickbooks.read"],
+      resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.config.resourceUri),
+    });
+    organizationBinding = makeOrganizationBindingMiddleware(options.config, options.services);
+  } else {
+    // Organization arrives in per-call metadata, so the binding middleware
+    // stays out of the way as in temporary mode; the execution seam re-runs
+    // the policy on every tool call.
+    authenticate = makeSharedSecretMiddleware(options.config);
+    organizationBinding = passThrough;
+  }
   const scope = makeScopeMiddleware(options.config, toolAuthority);
-  const organizationBinding = options.config.temporaryUnauthenticatedMode
-    ? passThrough
-    : makeOrganizationBindingMiddleware(options.config, options.services);
   const executionInput = makeExecutionInputMiddleware();
   const nodeHandler = toNodeHandler(handler, {
     onerror: (error) => {
@@ -609,17 +716,15 @@ export async function prepareHttpApp(
 ): Promise<PreparedHttpApp> {
   process.env.QUICKBOOKS_NON_INTERACTIVE = "true";
   const config = options.config ?? loadHttpConfig();
-  const oauthMetadata = options.oauthMetadata ?? await loadOAuthMetadata(config, {
-    fetchImpl: options.fetchImpl,
-  });
-  const tokenVerifier = options.tokenVerifier ?? new OAuthAccessTokenVerifier({
-    issuer: config.authIssuer,
-    resourceUri: config.resourceUri.toString(),
-    introspectionUrl: config.authIntrospectionUrl.toString(),
-    introspectionClientId: config.authIntrospectionClientId,
-    introspectionClientSecret: config.authIntrospectionClientSecret,
-    fetchImpl: options.fetchImpl,
-  });
+  const oauthMode = authModeOf(config) === "oauth";
+  // Shared-secret mode publishes no authorization-server metadata and
+  // introspects nothing, so neither is fetched or constructed for it.
+  const oauthMetadata = oauthMode
+    ? options.oauthMetadata ?? await loadOAuthMetadata(config, { fetchImpl: options.fetchImpl })
+    : undefined;
+  const tokenVerifier = oauthMode
+    ? options.tokenVerifier ?? oauthVerifierFrom(config, options.fetchImpl)
+    : undefined;
 
   // Runtime composition validates configuration without acquiring a customer
   // lease. No QuickBooks credential is loaded during cold start.
