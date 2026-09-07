@@ -5,6 +5,26 @@ All notable changes to the QuickBooks Online MCP Server are documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `MCP_AUTH_MODE=shared-secret`: the Finance worker authenticates with one
+  shared secret (`MCP_SHARED_SECRET`) compared in constant time over SHA-256
+  digests. The caller identity is fixed to `finance-worker`, organization and
+  company come from per-call metadata, the OAuth metadata router is not
+  mounted, and no network call is made at startup. Production since
+  2026-09-07. Decision record and future plan:
+  `finance-ai-employees/spec/quickbooks-mcp-shared-secret-design.md`.
+
+### Changed
+
+- `MCP_AUTH_MODE=oauth` (the default) is unchanged in behavior. Its settings
+  are now validated before the MCP handler is allocated, so a misconfiguration
+  fails at composition rather than behind an open handler.
+- `MCP_TEMPORARY_UNAUTHENTICATED_MODE` cannot be combined with shared-secret
+  mode; startup refuses the pair.
+
 ## [0.0.1] - 2024-01-13
 
 ### Summary

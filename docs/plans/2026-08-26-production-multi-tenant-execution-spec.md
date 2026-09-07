@@ -2,6 +2,10 @@
 
 # QuickBooks Online MCP: Production Multi-Tenant Execution Specification
 
+> Status note, 2026-09-07: the bearer verification this plan describes is the
+> `oauth` mode. Production runs `MCP_AUTH_MODE=shared-secret`; see
+> `docs/REMOTE-HTTP.md`, Authorization and scopes.
+
 ## Document metadata
 
 - Status: Locally implemented for the AuthCo/MCP contract; live integration pending
