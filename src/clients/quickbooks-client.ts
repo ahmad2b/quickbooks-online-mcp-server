@@ -27,7 +27,11 @@ export class QboExecutionError extends Error {
   constructor(
     public readonly code:
       | "QBO_EXECUTION_LEASE_UNAVAILABLE"
-      | "QBO_EXECUTION_LEASE_INVALID",
+      | "QBO_EXECUTION_LEASE_INVALID"
+      | "QBO_REAUTHORIZATION_REQUIRED"
+      | "QBO_ACCESS_NOT_ALLOWED"
+      | "QBO_BUSINESS_STOPPED"
+      | "QBO_ENVIRONMENT_MISMATCH",
     message: string,
   ) {
     super(message);

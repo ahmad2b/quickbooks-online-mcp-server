@@ -50,6 +50,30 @@ function invalid(): QboExecutionError {
   );
 }
 
+async function boundedPayload(response: Response): Promise<unknown> {
+  if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) throw invalid();
+  const reader = response.body?.getReader();
+  if (!reader) throw invalid();
+  let bytes = 0;
+  let body = "";
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw invalid();
+      }
+      body += decoder.decode(part.value, { stream: true });
+    }
+    body += decoder.decode();
+  } finally { reader.releaseLock(); }
+  try { return JSON.parse(body) as unknown; }
+  catch { throw invalid(); }
+}
+
 function validBaseUrl(
   input: string | URL,
   environment: QuickBooksEnvironment,
@@ -201,16 +225,21 @@ export class FinanceExecutionLeaseProvider implements QboExecutionLeaseProvider 
         redirect: "error",
         signal: controller.signal,
       });
-      if (!response.ok) throw unavailable();
-      const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-      if (!contentType.startsWith("application/json")) throw invalid();
-      const text = await response.text();
-      if (!text || text.length > MAX_RESPONSE_BYTES) throw invalid();
-      try {
-        return JSON.parse(text) as unknown;
-      } catch {
-        throw invalid();
+      if (!response.ok) {
+        const body = await boundedPayload(response).catch(() => null) as { error?: { code?: unknown } } | null;
+        const reasons: Record<string, QboExecutionError["code"]> = {
+          reauthorization_required: "QBO_REAUTHORIZATION_REQUIRED",
+          staff_company_authorization_required: "QBO_ACCESS_NOT_ALLOWED",
+          business_stopped: "QBO_BUSINESS_STOPPED",
+          environment_mismatch: "QBO_ENVIRONMENT_MISMATCH",
+        };
+        const code = body?.error?.code;
+        if (typeof code === "string" && Object.prototype.hasOwnProperty.call(reasons, code)) {
+          throw new QboExecutionError(reasons[code]!, "The Books request was not attempted.");
+        }
+        throw unavailable();
       }
+      return await boundedPayload(response);
     } catch (error) {
       if (error instanceof QboExecutionError) throw error;
       throw unavailable();

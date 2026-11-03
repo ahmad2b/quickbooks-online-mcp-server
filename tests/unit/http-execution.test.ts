@@ -9,6 +9,9 @@ import {
   type OAuthMetadata,
 } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { FinanceExecutionLeaseProvider } from "../../src/adapters/finance-execution-lease-provider";
+import { RequestScopedQboClientFactory, type QuickBooksConstructor } from "../../src/clients/quickbooks-client";
+import { GetCompanyInfoTool } from "../../src/tools/get-company-info.tool";
 import { ClaimBindingAuthorizationPolicy } from "../../src/runtime/authorization-policy";
 import {
   createHttpApp,
@@ -116,7 +119,7 @@ function tokenInfo(token: FakeToken): AuthInfo {
 }
 
 function makeHarness(
-  options: { leaseError?: Error; temporaryUnauthenticatedMode?: boolean } = {},
+  options: { leaseError?: Error; temporaryUnauthenticatedMode?: boolean; clientFactory?: RuntimeServices["qboClientFactory"] } = {},
 ): Harness {
   const qboCalls: QboCall[] = [];
   const leaseCreate = jest.fn(async (execution: ExecutionContext): Promise<QboClientLease> => {
@@ -147,7 +150,7 @@ function makeHarness(
     };
   });
   const services: RuntimeServices = {
-    qboClientFactory: { create: leaseCreate },
+    qboClientFactory: options.clientFactory ?? { create: leaseCreate },
     authorizationPolicy: new ClaimBindingAuthorizationPolicy({
       issuer: ISSUER,
       organizationClaim: ORGANIZATION_CLAIM,
@@ -196,6 +199,7 @@ function makeHarness(
       { name: "HTTP execution test server", version: "test" },
       { capabilities: { tools: {} } },
     );
+    RegisterTool(server, GetCompanyInfoTool, services);
     RegisterTool(server, readDefinition, services);
     RegisterTool(server, writeDefinition, services);
     return server;
@@ -209,7 +213,7 @@ function makeHarness(
     tokenVerifier: { verifyAccessToken },
     serverFactory,
     services,
-    toolAuthority: (name: string) => name === "get_probe" ? "read" : name === "create_probe" ? "write" : undefined,
+    toolAuthority: (name: string) => name === "get_probe" || name === "get_company_info" ? "read" : name === "create_probe" ? "write" : undefined,
     logger: () => undefined,
   });
   return { app, config: httpConfig, leaseCreate, qboCalls, verifyAccessToken };
@@ -533,5 +537,115 @@ describe("AuthCo OAuth token verification", () => {
         .rejects.toThrow(/invalid|audience|expir|subject|client/i);
       expect(label).toEqual(expect.any(String));
     }
+  });
+});
+
+
+describe("safe Books failure reasons at authenticated tools/call", () => {
+  it.each(["unknown_code", "malformed", "empty_body", "invalid_json", "oversized", "transport"])("falls back safely for %s before any provider request", async (scenario) => {
+    let providerCalls = 0;
+    class FakeQuickBooks { getCompanyInfo() { providerCalls += 1; } }
+    const provider = new FinanceExecutionLeaseProvider({
+      baseUrl: "https://finance.synthetic.test", workloadToken: "synthetic-workload-marker-not-a-credential", environment: "production",
+      fetchImpl: async () => {
+        if (scenario === "transport") throw new Error("DO_NOT_EXPOSE_TRANSPORT_DETAIL");
+        if (scenario === "empty_body") return new Response(null, { status: 409, headers: { "content-type": "application/json" } });
+        if (scenario === "invalid_json") return new Response("DO_NOT_EXPOSE_INVALID_JSON", { status: 409, headers: { "content-type": "application/json" } });
+        if (scenario === "malformed") return new Response("DO_NOT_EXPOSE_MALFORMED_DETAIL", { status: 502 });
+        if (scenario === "oversized") return Response.json({ error: { code: "reauthorization_required", message: "DO_NOT_EXPOSE_OVERSIZED_DETAIL".repeat(5000) } }, { status: 409 });
+        return Response.json({ error: { code: "DO_NOT_EXPOSE_UNKNOWN_CODE", message: "DO_NOT_EXPOSE_UNKNOWN_DETAIL" } }, { status: 409 });
+      },
+    });
+    const factory = new RequestScopedQboClientFactory(provider, { QuickBooksConstructor: FakeQuickBooks as unknown as QuickBooksConstructor });
+    const response = await post(makeHarness({ clientFactory: factory }), "tenant-a", callBody("get_company_info", "safe-read", {}));
+    expect(response.body.result).toMatchObject({ isError: true, _meta: { errorCode: "QBO_EXECUTION_LEASE_UNAVAILABLE", providerAttempted: false } });
+    expect(JSON.stringify(response.body)).not.toMatch(/DO_NOT_EXPOSE|execution lease/);
+    expect(providerCalls).toBe(0);
+  });
+
+  it.each(["provider_failure", "provider_transport", "success"])("records %s only after the SDK read is invoked", async (outcome) => {
+    let providerCalls = 0;
+    class FakeQuickBooks {
+      realmId = "synthetic-books";
+      getCompanyInfo(_id: string, callback: (error: Error | null, value?: unknown) => void) {
+        providerCalls += 1;
+        const error = outcome === "success" ? null : Object.assign(new Error("DO_NOT_EXPOSE_PROVIDER_DETAIL"), { code: outcome === "provider_transport" ? "ECONNRESET" : "HTTP_ERROR" });
+        callback(error, outcome === "success" ? { synthetic: true } : undefined);
+      }
+    }
+    const provider = new FinanceExecutionLeaseProvider({
+      baseUrl: "https://finance.synthetic.test", workloadToken: "synthetic-workload-marker-not-a-credential", environment: "production",
+      fetchImpl: async () => Response.json({ organization_id: "organization-tenant-a", company_id: COMPANY_A,
+        qbo_connection_id: "00000000-0000-4000-8000-000000000003", lease_id: "00000000-0000-4000-8000-000000000004",
+        environment: "production", credential_version: "1", access_token: "synthetic-marker", realm_id: "synthetic-books", expires_at: new Date(Date.now() + 60_000).toISOString() }),
+    });
+    const factory = new RequestScopedQboClientFactory(provider, { QuickBooksConstructor: FakeQuickBooks as unknown as QuickBooksConstructor });
+    const response = await post(makeHarness({ clientFactory: factory }), "tenant-a", callBody("get_company_info", "safe-read", {}));
+    expect(providerCalls).toBe(1);
+    expect(response.body.result?._meta?.providerAttempted).toBe(true);
+    if (outcome !== "success") {
+      expect(response.body.result).toMatchObject({ isError: true, _meta: { errorCode: outcome === "provider_transport" ? "QBO_PROVIDER_TRANSPORT_FAILED" : "QBO_PROVIDER_REQUEST_FAILED" } });
+      expect(response.body.result.content[0].text).toMatch(/attempted.*failed/i);
+      expect(JSON.stringify(response.body)).not.toContain("DO_NOT_EXPOSE_PROVIDER_DETAIL");
+    } else {
+      expect(response.body.result?.isError).not.toBe(true);
+      expect(JSON.parse(response.body.result.content[0].text)).toEqual({ synthetic: true });
+    }
+  });
+
+  it.each([
+    ["reauthorization_required", "QBO_REAUTHORIZATION_REQUIRED", /reconnect/i],
+    ["staff_company_authorization_required", "QBO_ACCESS_NOT_ALLOWED", /allow Penny/i],
+    ["business_stopped", "QBO_BUSINESS_STOPPED", /don't retry/i],
+    ["environment_mismatch", "QBO_ENVIRONMENT_MISMATCH", /owner/i],
+    ["provider_temporarily_unavailable", "QBO_EXECUTION_LEASE_UNAVAILABLE", /later/i],
+  ])("preserves %s without a provider request or downstream text", async (code, errorCode, action) => {
+    let providerCalls = 0;
+    class FakeQuickBooks {
+      getCompanyInfo() { providerCalls += 1; }
+    }
+    const provider = new FinanceExecutionLeaseProvider({
+      baseUrl: "https://finance.synthetic.test", workloadToken: "synthetic-workload-marker-not-a-credential", environment: "production",
+      fetchImpl: async () => Response.json({ error: { code, message: "DO_NOT_EXPOSE_DOWNSTREAM_DETAIL" } }, { status: 409 }),
+    });
+    const factory = new RequestScopedQboClientFactory(provider, { QuickBooksConstructor: FakeQuickBooks as unknown as QuickBooksConstructor });
+    const response = await post(makeHarness({ clientFactory: factory }), "tenant-a", callBody("get_company_info", "safe-read", {}));
+    expect(response.status).toBe(200);
+    expect(response.body.result).toMatchObject({ isError: true, _meta: { errorCode, providerAttempted: false } });
+    const text = response.body.result.content[0].text;
+    expect(text).toMatch(/not attempted/i);
+    expect(text).toMatch(action as RegExp);
+    expect(text).not.toMatch(/execution lease|DO_NOT_EXPOSE_DOWNSTREAM_DETAIL/);
+    expect(providerCalls).toBe(0);
+  });
+});
+
+
+describe("safe SDK and handler failure evidence", () => {
+  it.each(["sdk_throw", "before_sdk"])("keeps %s separate from a lease refusal", async (scenario) => {
+    let providerCalls = 0;
+    class FakeQuickBooks {
+      realmId = "synthetic-books";
+      getAccount() {
+        providerCalls += 1;
+        throw Object.assign(new Error("DO_NOT_EXPOSE_SDK_DETAIL"), { code: "ETIMEDOUT" });
+      }
+      get getCompanyInfo(): never { throw new Error("DO_NOT_EXPOSE_HANDLER_DETAIL"); }
+    }
+    const provider = new FinanceExecutionLeaseProvider({
+      baseUrl: "https://finance.synthetic.test", workloadToken: "synthetic-workload-marker-not-a-credential", environment: "production",
+      fetchImpl: async () => Response.json({ organization_id: "organization-tenant-a", company_id: COMPANY_A,
+        qbo_connection_id: "00000000-0000-4000-8000-000000000003", lease_id: "00000000-0000-4000-8000-000000000004",
+        environment: "production", credential_version: "1", access_token: "synthetic-marker", realm_id: "synthetic-books", expires_at: new Date(Date.now() + 60_000).toISOString() }),
+    });
+    const factory = new RequestScopedQboClientFactory(provider, { QuickBooksConstructor: FakeQuickBooks as unknown as QuickBooksConstructor });
+    const body = scenario === "sdk_throw" ? callBody("get_probe") : callBody("get_company_info", "safe-read", {});
+    const response = await post(makeHarness({ clientFactory: factory }), "tenant-a", body);
+    expect(response.body.result).toMatchObject({ isError: true, _meta: {
+      errorCode: scenario === "sdk_throw" ? "QBO_PROVIDER_TRANSPORT_FAILED" : "QBO_REQUEST_OUTCOME_UNCONFIRMED",
+      providerAttempted: scenario === "sdk_throw" ? true : null,
+    } });
+    expect(providerCalls).toBe(scenario === "sdk_throw" ? 1 : 0);
+    expect(JSON.stringify(response.body)).not.toMatch(/DO_NOT_EXPOSE|execution lease/);
   });
 });

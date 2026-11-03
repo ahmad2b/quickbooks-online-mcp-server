@@ -306,25 +306,77 @@ async function executeWithLease(
   services: RuntimeServices,
 ): Promise<unknown> {
   const lease = await services.qboClientFactory.create(execution);
+  let providerAttempted = false;
+  let transportFailed = false;
   try {
-    const dependencies: QboHandlerDependencies = Object.freeze({
-      execution,
-      qbo: lease.qbo,
-      rawQbo: lease.rawQbo,
+    const qbo = new Proxy(lease.qbo, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          providerAttempted = true;
+          const callback = args[args.length - 1];
+          if (typeof callback === "function") {
+            args[args.length - 1] = (error: unknown, ...values: unknown[]) => {
+              transportFailed ||= isTransportFailure(error);
+              return Reflect.apply(callback, undefined, [error, ...values]);
+            };
+          }
+          try { return Reflect.apply(value, target, args); }
+          catch (error) {
+            transportFailed ||= isTransportFailure(error);
+            throw error;
+          }
+        };
+      },
     });
-    return await definition.handler(
-      { params: input as z.infer<typeof definition.schema> },
-      context,
-      dependencies,
+    const dependencies: QboHandlerDependencies = Object.freeze({ execution, qbo, rawQbo: lease.rawQbo });
+    const result = await definition.handler(
+      { params: input as z.infer<typeof definition.schema> }, context, dependencies,
     );
+    if (resultIsError(result)) return providerErrorResult(providerAttempted, transportFailed);
+    return { ...(result as Record<string, unknown>), _meta: { providerAttempted: providerAttempted ? true : null } };
+  } catch {
+    return providerErrorResult(providerAttempted, transportFailed);
+
   } finally {
     await lease.close().catch(() => undefined);
   }
 }
 
+function isTransportFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && ["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "ESOCKETTIMEDOUT"].includes(code);
+}
+
+function providerErrorResult(attempted: boolean, transportFailed: boolean): Record<string, unknown> {
+  const code = !attempted ? "QBO_REQUEST_OUTCOME_UNCONFIRMED" : transportFailed ? "QBO_PROVIDER_TRANSPORT_FAILED" : "QBO_PROVIDER_REQUEST_FAILED";
+  const message = attempted
+    ? transportFailed
+      ? "The Books request was attempted, but the connection failed before a result could be confirmed. Check the outcome before trying again."
+      : "The Books request was attempted but failed to return a confirmed result. Check the outcome before trying again."
+    : "No result was confirmed. It is not known whether the Books request was attempted. Check the outcome before trying again.";
+  const result = safeToolError(code, message);
+  result._meta = { errorCode: code, providerAttempted: attempted ? true : null };
+  return result;
+}
+
+const LEASE_FAILURES: Record<QboExecutionError["code"], { reason: string; message: string }> = {
+  QBO_EXECUTION_LEASE_UNAVAILABLE: { reason: "temporarily_unavailable", message: "Books access is temporarily unavailable. Try again later." },
+  QBO_EXECUTION_LEASE_INVALID: { reason: "access_unconfirmed", message: "Books access could not be confirmed. Ask the owner to check the connection." },
+  QBO_REAUTHORIZATION_REQUIRED: { reason: "reauthorization_required", message: "Reconnect your books before trying again." },
+  QBO_ACCESS_NOT_ALLOWED: { reason: "access_not_allowed", message: "Allow Penny on the Business page before trying again." },
+  QBO_BUSINESS_STOPPED: { reason: "business_stopped", message: "Penny is stopped for this business. Don't retry; resume her on its Business page to continue." },
+  QBO_ENVIRONMENT_MISMATCH: { reason: "environment_incompatible", message: "These books cannot be used here. Ask the owner to check the connection." },
+};
+
 function qboErrorResult(error: unknown): Record<string, unknown> {
-  if (error instanceof QboExecutionError) return safeToolError(error.code, error.message);
-  return safeToolError("QBO_EXECUTION_LEASE_UNAVAILABLE", "The QuickBooks execution lease is unavailable.");
+  const code = error instanceof QboExecutionError && Object.prototype.hasOwnProperty.call(LEASE_FAILURES, error.code) ? error.code : "QBO_EXECUTION_LEASE_UNAVAILABLE";
+  const failure = LEASE_FAILURES[code];
+  const result = safeToolError(code, `The Books request was not attempted. ${failure.message}`);
+  result._meta = { errorCode: code, providerAttempted: false, failureReason: failure.reason };
+  return result;
 }
 
 /**
